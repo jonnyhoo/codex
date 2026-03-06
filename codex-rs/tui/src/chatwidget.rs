@@ -86,6 +86,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::dynamic_tools::DynamicToolCallRequest;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::models::MessagePhase;
@@ -102,6 +103,7 @@ use codex_protocol::protocol::BackgroundEventEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::DeprecationNoticeEvent;
+use codex_protocol::protocol::DynamicToolCallResponseEvent;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -242,6 +244,7 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
+use crate::history_cell::DynamicToolCallCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
@@ -594,6 +597,7 @@ pub(crate) struct ChatWidget {
     /// bottom pane is treated as "running" while this is populated, even if no agent turn is
     /// currently executing.
     mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
+    lsp_provider_statuses: Vec<codex_core::LspProviderStatus>,
     connectors_cache: ConnectorsCacheState,
     connectors_prefetch_in_flight: bool,
     connectors_force_refetch_pending: bool,
@@ -1250,6 +1254,7 @@ impl ChatWidget {
         if self.connectors_enabled() {
             self.prefetch_connectors();
         }
+        self.refresh_lsp_provider_status();
         if let Some(user_message) = self.initial_user_message.take() {
             self.submit_user_message(user_message);
         }
@@ -2413,6 +2418,22 @@ impl ChatWidget {
         self.defer_or_handle(|q| q.push_mcp_end(ev), |s| s.handle_mcp_end_now(ev2));
     }
 
+    fn on_dynamic_tool_call_request(&mut self, ev: DynamicToolCallRequest) {
+        let ev2 = ev.clone();
+        self.defer_or_handle(
+            |q| q.push_dynamic_tool_begin(ev),
+            |s| s.handle_dynamic_tool_begin_now(ev2),
+        );
+    }
+
+    fn on_dynamic_tool_call_response(&mut self, ev: DynamicToolCallResponseEvent) {
+        let ev2 = ev.clone();
+        self.defer_or_handle(
+            |q| q.push_dynamic_tool_end(ev),
+            |s| s.handle_dynamic_tool_end_now(ev2),
+        );
+    }
+
     fn on_web_search_begin(&mut self, ev: WebSearchBeginEvent) {
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
@@ -2899,6 +2920,60 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn handle_dynamic_tool_begin_now(&mut self, ev: DynamicToolCallRequest) {
+        self.flush_answer_stream_with_separator();
+        self.flush_active_cell();
+        self.active_cell = Some(Box::new(history_cell::new_active_dynamic_tool_call(
+            ev.call_id,
+            ev.tool,
+            ev.arguments,
+            self.config.animations,
+        )));
+        self.bump_active_cell_revision();
+        self.request_redraw();
+    }
+
+    pub(crate) fn handle_dynamic_tool_end_now(&mut self, ev: DynamicToolCallResponseEvent) {
+        self.flush_answer_stream_with_separator();
+
+        let DynamicToolCallResponseEvent {
+            call_id,
+            tool,
+            arguments,
+            content_items,
+            success,
+            error,
+            duration,
+            ..
+        } = ev;
+
+        let mut handled = false;
+        if let Some(cell) = self
+            .active_cell
+            .as_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<DynamicToolCallCell>())
+            && cell.call_id() == call_id
+        {
+            cell.complete(duration, content_items.clone(), success, error.clone());
+            handled = true;
+        }
+
+        if !handled {
+            self.flush_active_cell();
+            let mut cell = history_cell::new_active_dynamic_tool_call(
+                call_id,
+                tool,
+                arguments,
+                self.config.animations,
+            );
+            cell.complete(duration, content_items, success, error);
+            self.active_cell = Some(Box::new(cell));
+        }
+
+        self.flush_active_cell();
+        self.had_work_activity = true;
+    }
+
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         // Ensure the status indicator is visible while the command runs.
         self.bottom_pane.ensure_status_indicator();
@@ -3107,6 +3182,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            lsp_provider_statuses: Vec::new(),
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             connectors_force_refetch_pending: false,
@@ -3289,6 +3365,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            lsp_provider_statuses: Vec::new(),
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             connectors_force_refetch_pending: false,
@@ -3463,6 +3540,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            lsp_provider_statuses: Vec::new(),
             connectors_cache: ConnectorsCacheState::default(),
             connectors_prefetch_in_flight: false,
             connectors_force_refetch_pending: false,
@@ -4249,6 +4327,71 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    fn refresh_lsp_provider_status(&mut self) {
+        let cwd = self.config.cwd.clone();
+        let codex_home = self.config.codex_home.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let statuses = tokio::task::spawn_blocking(move || {
+                codex_core::probe_lsp_provider_status(cwd.as_path(), codex_home.as_path())
+            })
+            .await
+            .unwrap_or_default();
+            app_event_tx.send(AppEvent::LspProviderStatusFetched(statuses));
+        });
+    }
+
+    pub(crate) fn on_lsp_provider_status_fetched(
+        &mut self,
+        statuses: Vec<codex_core::LspProviderStatus>,
+    ) {
+        self.lsp_provider_statuses = statuses;
+        self.maybe_notify_lsp_status();
+    }
+
+    fn maybe_notify_lsp_status(&mut self) {
+        if self.lsp_provider_statuses.is_empty() {
+            return;
+        }
+
+        let ready: Vec<String> = self
+            .lsp_provider_statuses
+            .iter()
+            .filter(|provider| provider.status == "ready")
+            .map(|provider| provider.id.clone())
+            .collect();
+        let unhealthy: Vec<String> = self
+            .lsp_provider_statuses
+            .iter()
+            .filter(|provider| provider.status == "failed")
+            .map(|provider| provider.id.clone())
+            .collect();
+        let unavailable: Vec<String> = self
+            .lsp_provider_statuses
+            .iter()
+            .filter(|provider| provider.status == "unavailable")
+            .map(|provider| provider.id.clone())
+            .collect();
+
+        let mut parts = Vec::new();
+        if !ready.is_empty() {
+            parts.push(format!("ready: {}", ready.join(", ")));
+        }
+        if !unhealthy.is_empty() {
+            parts.push(format!("failed: {}", unhealthy.join(", ")));
+        }
+        if !unavailable.is_empty() {
+            parts.push(format!("unavailable: {}", unavailable.join(", ")));
+        }
+        if parts.is_empty() {
+            return;
+        }
+
+        self.notify(Notification::LspStatus {
+            summary: format!("LSP {}", parts.join("; ")),
+        });
+    }
+
     pub(crate) fn handle_paste(&mut self, text: String) {
         self.bottom_pane.handle_paste(text);
     }
@@ -4770,6 +4913,8 @@ impl ChatWidget {
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
+            EventMsg::DynamicToolCallRequest(ev) => self.on_dynamic_tool_call_request(ev),
+            EventMsg::DynamicToolCallResponse(ev) => self.on_dynamic_tool_call_response(ev),
             EventMsg::ListRemoteSkillsResponse(_) | EventMsg::RemoteSkillDownloaded(_) => {}
             EventMsg::SkillsUpdateAvailable => {
                 self.submit_op(Op::ListSkills {
@@ -4833,9 +4978,7 @@ impl ChatWidget {
             | EventMsg::ItemStarted(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::ReasoningContentDelta(_)
-            | EventMsg::ReasoningRawContentDelta(_)
-            | EventMsg::DynamicToolCallRequest(_)
-            | EventMsg::DynamicToolCallResponse(_) => {}
+            | EventMsg::ReasoningRawContentDelta(_) => {}
             EventMsg::RealtimeConversationStarted(ev) => {
                 if !from_replay {
                     self.on_realtime_conversation_started(ev);
@@ -5030,6 +5173,8 @@ impl ChatWidget {
                 exec.mark_failed();
             } else if let Some(tool) = cell.as_any_mut().downcast_mut::<McpToolCallCell>() {
                 tool.mark_failed();
+            } else if let Some(tool) = cell.as_any_mut().downcast_mut::<DynamicToolCallCell>() {
+                tool.mark_failed();
             }
             self.add_boxed_history(cell);
         }
@@ -5091,6 +5236,14 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
+        let lsp_providers = if self.lsp_provider_statuses.is_empty() {
+            codex_core::list_lsp_provider_status(
+                self.config.cwd.as_path(),
+                self.config.codex_home.as_path(),
+            )
+        } else {
+            self.lsp_provider_statuses.clone()
+        };
         self.add_to_history(crate::status::new_status_output_with_rate_limits(
             &self.config,
             self.auth_manager.as_ref(),
@@ -5105,6 +5258,7 @@ impl ChatWidget {
             self.model_display_name(),
             collaboration_mode,
             reasoning_effort_override,
+            lsp_providers,
         ));
     }
 
@@ -8437,6 +8591,9 @@ enum Notification {
     AgentTurnComplete {
         response: String,
     },
+    LspStatus {
+        summary: String,
+    },
     ExecApprovalRequested {
         command: String,
     },
@@ -8463,6 +8620,7 @@ impl Notification {
                 Notification::agent_turn_preview(response)
                     .unwrap_or_else(|| "Agent turn complete".to_string())
             }
+            Notification::LspStatus { summary } => summary.clone(),
             Notification::ExecApprovalRequested { command } => {
                 format!("Approval requested: {}", truncate_text(command, 30))
             }
@@ -8497,6 +8655,7 @@ impl Notification {
     fn type_name(&self) -> &str {
         match self {
             Notification::AgentTurnComplete { .. } => "agent-turn-complete",
+            Notification::LspStatus { .. } => "lsp-status",
             Notification::ExecApprovalRequested { .. }
             | Notification::EditApprovalRequested { .. }
             | Notification::ElicitationRequested { .. } => "approval-requested",
@@ -8508,6 +8667,7 @@ impl Notification {
     fn priority(&self) -> u8 {
         match self {
             Notification::AgentTurnComplete { .. } => 0,
+            Notification::LspStatus { .. } => 0,
             Notification::ExecApprovalRequested { .. }
             | Notification::EditApprovalRequested { .. }
             | Notification::ElicitationRequested { .. }

@@ -45,6 +45,7 @@ use codex_core::web_search::web_search_detail;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::mcp::Resource;
 use codex_protocol::mcp::ResourceTemplate;
 use codex_protocol::models::WebSearchAction;
@@ -1327,6 +1328,146 @@ pub(crate) struct McpToolCallCell {
     animations_enabled: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct DynamicToolCallCell {
+    call_id: String,
+    tool: String,
+    arguments: serde_json::Value,
+    start_time: Instant,
+    duration: Option<Duration>,
+    content_items: Option<Vec<DynamicToolCallOutputContentItem>>,
+    success: Option<bool>,
+    error: Option<String>,
+    animations_enabled: bool,
+}
+
+impl DynamicToolCallCell {
+    pub(crate) fn new(
+        call_id: String,
+        tool: String,
+        arguments: serde_json::Value,
+        animations_enabled: bool,
+    ) -> Self {
+        Self {
+            call_id,
+            tool,
+            arguments,
+            start_time: Instant::now(),
+            duration: None,
+            content_items: None,
+            success: None,
+            error: None,
+            animations_enabled,
+        }
+    }
+
+    pub(crate) fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    pub(crate) fn complete(
+        &mut self,
+        duration: Duration,
+        content_items: Vec<DynamicToolCallOutputContentItem>,
+        success: bool,
+        error: Option<String>,
+    ) {
+        self.duration = Some(duration);
+        self.content_items = Some(content_items);
+        self.success = Some(success);
+        self.error = error;
+    }
+
+    pub(crate) fn mark_failed(&mut self) {
+        self.duration = Some(self.start_time.elapsed());
+        self.success = Some(false);
+        self.error = Some("interrupted".to_string());
+    }
+
+    fn invocation_summary(&self) -> String {
+        if self.arguments.is_null() {
+            return self.tool.clone();
+        }
+        format!("{} {}", self.tool, self.arguments)
+    }
+
+    fn result_summary(&self, width: usize) -> Option<String> {
+        if let Some(error) = &self.error {
+            return Some(format_and_truncate_tool_result(
+                error,
+                TOOL_CALL_MAX_LINES,
+                width,
+            ));
+        }
+
+        let items = self.content_items.as_ref()?;
+        if items.is_empty() {
+            return Some("<no output>".to_string());
+        }
+
+        let mut parts = Vec::new();
+        for item in items {
+            match item {
+                DynamicToolCallOutputContentItem::InputText { text } => parts.push(text.clone()),
+                DynamicToolCallOutputContentItem::InputImage { image_url } => {
+                    if image_url.starts_with("data:image/") {
+                        parts.push("<image output>".to_string());
+                    } else {
+                        parts.push(format!("<image output: {image_url}>"));
+                    }
+                }
+            }
+        }
+
+        Some(format_and_truncate_tool_result(
+            &parts.join("\n\n"),
+            TOOL_CALL_MAX_LINES,
+            width,
+        ))
+    }
+}
+
+impl HistoryCell for DynamicToolCallCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let status = self.success;
+        let bullet = match status {
+            Some(true) => "●".green().bold(),
+            Some(false) => "●".red().bold(),
+            None => spinner(Some(self.start_time), self.animations_enabled),
+        };
+        let header_text = if status.is_some() {
+            "Called"
+        } else {
+            "Calling"
+        };
+        let invocation = self.invocation_summary();
+        let mut lines = vec![Line::from(vec![
+            bullet,
+            " ".into(),
+            header_text.bold(),
+            " ".into(),
+            invocation.into(),
+        ])];
+
+        if let Some(duration) = self.duration {
+            lines.push(Line::from(vec![
+                "  └ ".dim(),
+                format!("{} in {:.1}s", self.tool, duration.as_secs_f32()).dim(),
+            ]));
+        }
+
+        if let Some(summary) = self.result_summary((width as usize).saturating_sub(4).max(1)) {
+            let body_lines = summary
+                .lines()
+                .map(|line| Line::from(line.to_string()))
+                .collect();
+            lines.extend(prefix_lines(body_lines, "  └ ".dim(), "    ".into()));
+        }
+
+        lines
+    }
+}
+
 impl McpToolCallCell {
     pub(crate) fn new(
         call_id: String,
@@ -1508,6 +1649,15 @@ pub(crate) fn new_active_mcp_tool_call(
     animations_enabled: bool,
 ) -> McpToolCallCell {
     McpToolCallCell::new(call_id, invocation, animations_enabled)
+}
+
+pub(crate) fn new_active_dynamic_tool_call(
+    call_id: String,
+    tool: String,
+    arguments: serde_json::Value,
+    animations_enabled: bool,
+) -> DynamicToolCallCell {
+    DynamicToolCallCell::new(call_id, tool, arguments, animations_enabled)
 }
 
 fn web_search_header(completed: bool) -> &'static str {

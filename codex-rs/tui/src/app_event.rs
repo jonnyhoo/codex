@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use codex_chatgpt::connectors::AppInfo;
+use codex_core::LspProviderStatus;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
@@ -129,6 +130,9 @@ pub(crate) enum AppEvent {
 
     /// Result of refreshing rate limits
     RateLimitSnapshotFetched(RateLimitSnapshot),
+
+    /// Result of probing local LSP provider health.
+    LspProviderStatusFetched(Vec<LspProviderStatus>),
 
     /// Result of prefetching connectors.
     ConnectorsLoaded {

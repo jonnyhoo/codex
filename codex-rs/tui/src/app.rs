@@ -2246,6 +2246,9 @@ impl App {
             AppEvent::RateLimitSnapshotFetched(snapshot) => {
                 self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
             }
+            AppEvent::LspProviderStatusFetched(statuses) => {
+                self.chat_widget.on_lsp_provider_status_fetched(statuses);
+            }
             AppEvent::ConnectorsLoaded { result, is_final } => {
                 self.chat_widget.on_connectors_loaded(result, is_final);
             }

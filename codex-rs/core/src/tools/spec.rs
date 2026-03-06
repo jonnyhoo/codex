@@ -1421,6 +1421,157 @@ fn create_list_dir_tool() -> ToolSpec {
     })
 }
 
+fn create_lsp_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "action".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "LSP action: \"auto\", \"providers\", \"diagnostics\", \"definition\", \"references\", \"hover\", \"document_symbols\", \"workspace_symbols\", \"rename\", \"completion\", \"signature_help\", or \"code_actions\". Use \"auto\" when the user asks natural-language code questions and you want the tool to choose the best LSP operation."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "path".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional local file or directory path. Relative paths resolve from the turn cwd. Required for all actions except providers and workspace_symbols."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "language".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional language override, for example python, go, rust, typescript, javascript, or a hot-plugged provider such as java. Useful for providers, auto, or workspace_symbols when no path is provided."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "goal".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional natural-language intent for action=auto, such as \"where does this value come from\", \"what uses this function\", \"what is this symbol\", or \"why is this file failing\". The user does not need to know LSP terms."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "line".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "1-indexed line number for position-based actions such as definition, hover, completion, rename, and code_actions."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "column".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "1-indexed column number for position-based actions such as definition, hover, completion, rename, and code_actions."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "end_line".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional 1-indexed end line for code_actions ranges. Defaults to line when omitted."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "end_column".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional 1-indexed end column for code_actions ranges. Defaults to column when omitted."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "query".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional workspace symbol query string used by workspace_symbols."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "new_name".to_string(),
+            JsonSchema::String {
+                description: Some("Required new symbol name for rename.".to_string()),
+            },
+        ),
+        (
+            "include_declaration".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "Whether references should include the declaration location. Defaults to true."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional maximum number of results to return for list-like actions such as references, diagnostics, completion, symbols, and code_actions."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "trigger_character".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional completion/signature_help trigger character supplied to the language server."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "only".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some(
+                    "Optional code action kinds filter, for example [\"quickfix\", \"source.organizeImports\"]."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "timeout_ms".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional per-request timeout in milliseconds. Defaults to CODEX_LSP_TIMEOUT_MS or 15000."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "lsp".to_string(),
+        description:
+            "Language-aware local code intelligence backed by Language Server Protocol providers. Use this automatically when the user asks what code does, where data comes from, what uses a symbol, where an error originates, or why one change affects another. Users do not need to mention LSP. action=auto is the LLM-friendly default. action=providers reports which LSP languages are enabled and whether their servers are available. Additional providers can be hot-plugged by dropping JSON definitions into .codex/lsp-providers in the workspace or CODEx home."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["action".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_js_repl_tool() -> ToolSpec {
     // Keep JS input freeform, but block the most common malformed payload shapes
     // (JSON wrappers, quoted strings, and markdown fences) before they reach the
@@ -1806,6 +1957,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::JsReplHandler;
     use crate::tools::handlers::JsReplResetHandler;
     use crate::tools::handlers::ListDirHandler;
+    use crate::tools::handlers::LspHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
     use crate::tools::handlers::MultiAgentHandler;
@@ -1837,6 +1989,7 @@ pub(crate) fn build_specs(
     let search_tool_handler = Arc::new(SearchToolBm25Handler);
     let js_repl_handler = Arc::new(JsReplHandler);
     let js_repl_reset_handler = Arc::new(JsReplResetHandler);
+    let lsp_handler = Arc::new(LspHandler);
     let artifacts_handler = Arc::new(ArtifactsHandler);
     let request_permission_enabled = config.request_permission_enabled;
 
@@ -1910,6 +2063,9 @@ pub(crate) fn build_specs(
         builder.push_spec_with_parallel_support(create_search_tool_bm25_tool(&app_tools), true);
         builder.register_handler(SEARCH_TOOL_BM25_TOOL_NAME, search_tool_handler);
     }
+
+    builder.push_spec_with_parallel_support(create_lsp_tool(), true);
+    builder.register_handler("lsp", lsp_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {

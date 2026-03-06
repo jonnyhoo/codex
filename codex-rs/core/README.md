@@ -45,3 +45,22 @@ Expects the binary containing `codex-core` to run the equivalent of `codex sandb
 ### All Platforms
 
 Expects the binary containing `codex-core` to simulate the virtual `apply_patch` CLI when `arg1` is `--codex-run-as-apply-patch`. See the `codex-arg0` crate for details.
+
+## Local Changes
+
+### LSP Integration
+
+本 fork 在 `codex-core` 中新增了内置 LSP 能力，目标是让 LLM 自动使用，而不是要求用户理解 LSP 术语。
+
+当前变更包括：
+
+- 新增统一内置 `lsp` tool
+- 新增 `action=auto`，按自然语言问题自动选择最合适的 LSP 操作
+- 新增 provider registry，支持内置 provider + JSON 热插拔扩展
+- 新增 provider 状态与健康探测接口，供 TUI 和其他前端查询当前语言可用性
+
+关键文件：
+
+- `src/lsp.rs`
+- `src/tools/handlers/lsp.rs`
+- `src/tools/spec.rs`
