@@ -1649,4 +1649,214 @@ mod tests {
         let action = super::infer_auto_action(&request, Some(Path::new("src/main.rs")));
         assert_eq!(action, super::LspAction::References);
     }
+
+    #[test]
+    fn document_symbols_returns_go_functions_when_gopls_available() {
+        if super::resolve_command_path("gopls").is_none() {
+            return;
+        }
+
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::write(workspace.join("go.mod"), "module demo\n\ngo 1.22\n").expect("write go.mod");
+        let file_path = workspace.join("main.go");
+        std::fs::write(
+            &file_path,
+            "package main\n\nfunc helper() int {\n\treturn 1\n}\n\nfunc main() {\n\t_ = helper()\n}\n",
+        )
+        .expect("write go source");
+
+        let output = super::invoke(
+            super::LspToolRequest {
+                action: super::LspAction::DocumentSymbols,
+                path: Some(file_path.display().to_string()),
+                language: Some("go".to_string()),
+                goal: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                query: None,
+                new_name: None,
+                include_declaration: None,
+                limit: Some(20),
+                trigger_character: None,
+                only: Vec::new(),
+                timeout_ms: Some(30000),
+            },
+            workspace.clone(),
+            tempdir.path().join("codex-home"),
+        )
+        .expect("invoke go document symbols");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("go document symbols output should be valid json");
+        assert_eq!(payload["provider"], json!("go"));
+        assert_eq!(payload["resolved_action"], json!("document_symbols"));
+    }
+    #[test]
+    fn document_symbols_returns_rust_functions_when_rust_analyzer_available() {
+        if super::resolve_command_path("rust-analyzer").is_none() {
+            return;
+        }
+
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let src_dir = workspace.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write cargo toml");
+        let file_path = src_dir.join("main.rs");
+        std::fs::write(
+            &file_path,
+            "fn helper() -> i32 {\n    1\n}\n\nfn main() {\n    let _ = helper();\n}\n",
+        )
+        .expect("write rust source");
+
+        let output = super::invoke(
+            super::LspToolRequest {
+                action: super::LspAction::DocumentSymbols,
+                path: Some(file_path.display().to_string()),
+                language: Some("rust".to_string()),
+                goal: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                query: None,
+                new_name: None,
+                include_declaration: None,
+                limit: Some(20),
+                trigger_character: None,
+                only: Vec::new(),
+                timeout_ms: Some(30000),
+            },
+            workspace.clone(),
+            tempdir.path().join("codex-home"),
+        )
+        .expect("invoke document symbols");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("document symbols output should be valid json");
+        let result = payload["result"]
+            .as_array()
+            .expect("document symbols result should be an array");
+        let names: Vec<_> = result
+            .iter()
+            .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+        assert!(names.contains(&"helper"));
+        assert!(names.contains(&"main"));
+    }
+    #[test]
+    fn diagnostics_returns_python_type_errors_when_pyright_available() {
+        if super::resolve_command_path("pyright-langserver").is_none() {
+            return;
+        }
+
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let file_path = workspace.join("main.py");
+        std::fs::write(&file_path, "def helper() -> int:\n    return \"bad\"\n")
+            .expect("write python source");
+
+        let output = super::invoke(
+            super::LspToolRequest {
+                action: super::LspAction::Diagnostics,
+                path: Some(file_path.display().to_string()),
+                language: Some("python".to_string()),
+                goal: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                query: None,
+                new_name: None,
+                include_declaration: None,
+                limit: Some(20),
+                trigger_character: None,
+                only: Vec::new(),
+                timeout_ms: Some(30000),
+            },
+            workspace.clone(),
+            tempdir.path().join("codex-home"),
+        )
+        .expect("invoke python diagnostics");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("python diagnostics output should be valid json");
+        let _result = payload["result"]
+            .as_array()
+            .expect("python diagnostics result should be an array");
+        assert_eq!(payload["provider"], json!("python"));
+        assert_eq!(payload["resolved_action"], json!("diagnostics"));
+    }
+
+    #[test]
+    fn document_symbols_returns_typescript_functions_when_ts_server_available() {
+        if super::resolve_command_path("typescript-language-server").is_none() {
+            return;
+        }
+
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let src_dir = workspace.join("src");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::write(
+            workspace.join("package.json"),
+            "{\n  \"name\": \"demo\",\n  \"private\": true\n}\n",
+        )
+        .expect("write package json");
+        std::fs::write(
+            workspace.join("tsconfig.json"),
+            "{\n  \"compilerOptions\": {\n    \"target\": \"ES2020\",\n    \"module\": \"commonjs\"\n  }\n}\n",
+        )
+        .expect("write tsconfig");
+        let file_path = src_dir.join("main.ts");
+        std::fs::write(
+            &file_path,
+            "function helper(): number {\n  return 1;\n}\n\nfunction main(): number {\n  return helper();\n}\n",
+        )
+        .expect("write typescript source");
+
+        let output = super::invoke(
+            super::LspToolRequest {
+                action: super::LspAction::DocumentSymbols,
+                path: Some(file_path.display().to_string()),
+                language: Some("typescript".to_string()),
+                goal: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                query: None,
+                new_name: None,
+                include_declaration: None,
+                limit: Some(20),
+                trigger_character: None,
+                only: Vec::new(),
+                timeout_ms: Some(30000),
+            },
+            workspace.clone(),
+            tempdir.path().join("codex-home"),
+        )
+        .expect("invoke typescript document symbols");
+
+        let payload: serde_json::Value = serde_json::from_str(&output)
+            .expect("typescript document symbols output should be valid json");
+        let result = payload["result"]
+            .as_array()
+            .expect("typescript document symbols result should be an array");
+        let names: Vec<_> = result
+            .iter()
+            .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+        assert!(names.contains(&"helper"));
+        assert!(names.contains(&"main"));
+    }
 }

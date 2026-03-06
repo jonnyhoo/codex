@@ -58,6 +58,7 @@ Expects the binary containing `codex-core` to simulate the virtual `apply_patch`
 - 新增 `action=auto`，按自然语言问题自动选择最合适的 LSP 操作
 - 新增 provider registry，支持内置 provider + JSON 热插拔扩展
 - 新增 provider 状态与健康探测接口，供 TUI 和其他前端查询当前语言可用性
+- 新增真实 LSP 测试，已覆盖 Python、Go、TypeScript
 
 关键文件：
 

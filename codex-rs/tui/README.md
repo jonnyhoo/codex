@@ -1,4 +1,4 @@
-﻿# codex-tui
+# codex-tui
 
 `codex-tui` 是 Codex 的终端交互界面层，负责：
 
@@ -22,6 +22,6 @@
 本 fork 在 `tui` 层新增了 LSP 相关可见性与自动化支撑：
 
 - 不再忽略 dynamic tool 事件，已可在 TUI 中显示 dynamic tool 调用过程
-- `/status` 已集成 LSP provider 状态
+- `/status` 已集成 LSP provider 状态与健康状态摘要
 - session 初始化后会异步探测 LSP 健康状态，并通过轻量通知提示用户
 - 设计目标是：用户无须理解 LSP，只需知道哪些语言已启用、是否正常
