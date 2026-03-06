@@ -1,10 +1,16 @@
 <h1 align="center">OpenAI Codex CLI</h1>
 <p align="center">Lightweight coding agent that runs in your terminal</p>
 
-<p align="center"><code>npm i -g @openai/codex</code></p>
+<p align="center"><code>npm i -g @jonnyhoo/codex</code></p>
 
 > [!IMPORTANT]
-> This is the documentation for the _legacy_ TypeScript implementation of the Codex CLI. It has been superseded by the _Rust_ implementation. See the [README in the root of the Codex repository](https://github.com/openai/codex/blob/main/README.md) for details.
+> This is the documentation for the _legacy_ TypeScript implementation of the Codex CLI. It has been superseded by the _Rust_ implementation. See the [README in the root of this repository](../README.md) for details.
+
+> [!NOTE]
+> This fork defaults to publishing as `@jonnyhoo/codex`. The launcher and npm
+> staging scripts now derive platform package aliases from the base package
+> name automatically, so you can republish under another scope with
+> `--npm-name @your-scope/codex`.
 
 ![Codex demo GIF using: codex "explain this codebase to me"](../.github/demo.gif)
 
@@ -77,7 +83,7 @@ Help us improve by filing issues or submitting PRs (see the section below for ho
 Install globally:
 
 ```shell
-npm install -g @openai/codex
+npm install -g @jonnyhoo/codex
 ```
 
 Next, set your OpenAI API key as an environment variable:
@@ -248,7 +254,7 @@ Run Codex head-less in pipelines. Example GitHub Action step:
 ```yaml
 - name: Update changelog via Codex
   run: |
-    npm install -g @openai/codex
+    npm install -g @jonnyhoo/codex
     export OPENAI_API_KEY="${{ secrets.OPENAI_KEY }}"
     codex -a auto-edit --quiet "update CHANGELOG for next release"
 ```
@@ -287,13 +293,13 @@ Below are a few bite-size examples you can copy-paste. Replace the text in quote
 <summary><strong>From npm (Recommended)</strong></summary>
 
 ```bash
-npm install -g @openai/codex
+npm install -g @jonnyhoo/codex
 # or
-yarn global add @openai/codex
+yarn global add @jonnyhoo/codex
 # or
-bun install -g @openai/codex
+bun install -g @jonnyhoo/codex
 # or
-pnpm add -g @openai/codex
+pnpm add -g @jonnyhoo/codex
 ```
 
 </details>
@@ -303,7 +309,7 @@ pnpm add -g @openai/codex
 
 ```bash
 # Clone the repository and navigate to the CLI package
-git clone https://github.com/openai/codex.git
+git clone https://github.com/jonnyhoo/codex.git
 cd codex/codex-cli
 
 # Enable corepack
@@ -527,7 +533,7 @@ Codex CLI **does** support OpenAI organizations with [Zero Data Retention (ZDR)]
 OpenAI rejected the request. Error details: Status: 400, Code: unsupported_parameter, Type: invalid_request_error, Message: 400 Previous response cannot be used for this organization due to Zero Data Retention.
 ```
 
-You may need to upgrade to a more recent version with: `npm i -g @openai/codex@latest`
+You may need to upgrade to a more recent version with: `npm i -g @jonnyhoo/codex@latest`
 
 ---
 

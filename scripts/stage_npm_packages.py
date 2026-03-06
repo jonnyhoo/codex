@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -48,6 +49,28 @@ def parse_args() -> argparse.Namespace:
         help="Optional workflow URL to reuse for native artifacts.",
     )
     parser.add_argument(
+        "--vendor-src",
+        type=Path,
+        help="Use a prebuilt vendor root instead of downloading native release artifacts.",
+    )
+    parser.add_argument(
+        "--npm-name",
+        help="Override the base npm package name passed to the staging helper.",
+    )
+    parser.add_argument(
+        "--repository-url",
+        help="Override the repository URL written into staged package manifests.",
+    )
+    parser.add_argument(
+        "--platform-package",
+        action="append",
+        choices=tuple(CODEX_PLATFORM_PACKAGES),
+        help=(
+            "Limit the `codex` meta package to selected platform package(s). "
+            "When omitted with `--vendor-src`, the script infers available platforms from the vendor tree."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -68,10 +91,35 @@ def collect_native_components(packages: list[str]) -> set[str]:
     return components
 
 
-def expand_packages(packages: list[str]) -> list[str]:
+def infer_platform_packages_from_vendor(vendor_src: Path) -> list[str]:
+    package_by_target = {
+        package_config["target_triple"]: package_name
+        for package_name, package_config in CODEX_PLATFORM_PACKAGES.items()
+    }
+    inferred_packages: list[str] = []
+    if not vendor_src.exists():
+        return inferred_packages
+
+    for target_dir in vendor_src.iterdir():
+        if not target_dir.is_dir():
+            continue
+        package_name = package_by_target.get(target_dir.name)
+        if package_name is not None:
+            inferred_packages.append(package_name)
+
+    return inferred_packages
+
+
+def expand_packages(packages: list[str], platform_packages: list[str] | None = None) -> list[str]:
     expanded: list[str] = []
     for package in packages:
-        for expanded_package in PACKAGE_EXPANSIONS.get(package, [package]):
+        if package == "codex":
+            codex_expansions = ["codex", *(platform_packages or PACKAGE_EXPANSIONS.get(package, []))]
+            expansion_candidates = codex_expansions
+        else:
+            expansion_candidates = PACKAGE_EXPANSIONS.get(package, [package])
+
+        for expanded_package in expansion_candidates:
             if expanded_package in expanded:
                 continue
             expanded.append(expanded_package)
@@ -118,11 +166,16 @@ def install_native_components(
     if not components:
         return
 
-    cmd = [str(INSTALL_NATIVE_DEPS), "--workflow-url", workflow_url]
+    cmd = python_script_command(INSTALL_NATIVE_DEPS)
+    cmd.extend(["--workflow-url", workflow_url])
     for component in sorted(components):
         cmd.extend(["--component", component])
     cmd.append(str(vendor_root))
     run_command(cmd)
+
+
+def python_script_command(script_path: Path) -> list[str]:
+    return [sys.executable, str(script_path)]
 
 
 def run_command(cmd: list[str]) -> None:
@@ -145,7 +198,11 @@ def main() -> int:
 
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
 
-    packages = expand_packages(list(args.packages))
+    vendor_src_override = args.vendor_src.resolve() if args.vendor_src is not None else None
+    selected_platform_packages = list(args.platform_package or [])
+    if vendor_src_override is not None and not selected_platform_packages:
+        selected_platform_packages = infer_platform_packages_from_vendor(vendor_src_override)
+    packages = expand_packages(list(args.packages), selected_platform_packages or None)
     native_components = collect_native_components(packages)
 
     vendor_temp_root: Path | None = None
@@ -156,12 +213,15 @@ def main() -> int:
 
     try:
         if native_components:
-            workflow_url, resolved_head_sha = resolve_workflow_url(
-                args.release_version, args.workflow_url
-            )
-            vendor_temp_root = Path(tempfile.mkdtemp(prefix="npm-native-", dir=runner_temp))
-            install_native_components(workflow_url, native_components, vendor_temp_root)
-            vendor_src = vendor_temp_root / "vendor"
+            if vendor_src_override is not None:
+                vendor_src = vendor_src_override
+            else:
+                workflow_url, resolved_head_sha = resolve_workflow_url(
+                    args.release_version, args.workflow_url
+                )
+                vendor_temp_root = Path(tempfile.mkdtemp(prefix="npm-native-", dir=runner_temp))
+                install_native_components(workflow_url, native_components, vendor_temp_root)
+                vendor_src = vendor_temp_root / "vendor"
 
         if resolved_head_sha:
             print(f"should `git checkout {resolved_head_sha}`")
@@ -170,20 +230,29 @@ def main() -> int:
             staging_dir = Path(tempfile.mkdtemp(prefix=f"npm-stage-{package}-", dir=runner_temp))
             pack_output = output_dir / tarball_name_for_package(package, args.release_version)
 
-            cmd = [
-                str(BUILD_SCRIPT),
-                "--package",
-                package,
-                "--release-version",
-                args.release_version,
-                "--staging-dir",
-                str(staging_dir),
-                "--pack-output",
-                str(pack_output),
-            ]
+            cmd = python_script_command(BUILD_SCRIPT)
+            cmd.extend(
+                [
+                    "--package",
+                    package,
+                    "--release-version",
+                    args.release_version,
+                    "--staging-dir",
+                    str(staging_dir),
+                    "--pack-output",
+                    str(pack_output),
+                ]
+            )
 
             if vendor_src is not None:
                 cmd.extend(["--vendor-src", str(vendor_src)])
+            if args.npm_name is not None:
+                cmd.extend(["--npm-name", args.npm_name])
+            if args.repository_url is not None:
+                cmd.extend(["--repository-url", args.repository_url])
+            if package == "codex":
+                for platform_package in selected_platform_packages:
+                    cmd.extend(["--platform-package", platform_package])
 
             try:
                 run_command(cmd)

@@ -7,6 +7,7 @@
 - Upstream: `openai/codex`
 - Source version marker: `codex-cli 0.0.0-dev`
 - Local validation reference: `codex-cli 0.111.0`
+- npm package: `@jonnyhoo/codex`
 
 ## Current Changes
 
@@ -18,6 +19,7 @@
 - TUI 集成 LSP 状态展示：`/status` 可查看启用语言与健康状态
 - TUI 启动后自动做 LSP 健康探测，并给出轻量通知
 - TUI 不再忽略 dynamic tool 事件，为后续更深的自动化能力打基础
+- npm 发布链路已改成 fork 友好：默认发布到 `@jonnyhoo/codex`，并支持按本地 vendor 自动收窄平台包
 
 ## Validation
 
