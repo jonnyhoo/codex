@@ -22,6 +22,8 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_FILE_ARG1;
+use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::ReviewDecision;
@@ -31,6 +33,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
+use tempfile::TempDir;
 
 #[derive(Debug)]
 pub struct ApplyPatchRequest {
@@ -53,6 +56,7 @@ impl ApplyPatchRuntime {
     fn build_command_spec(
         req: &ApplyPatchRequest,
         manifest_path: PathBuf,
+        additional_permissions: PermissionProfile,
     ) -> Result<CommandSpec, ToolError> {
         use std::env;
         let exe = if let Some(path) = &req.codex_exe {
@@ -73,9 +77,45 @@ impl ApplyPatchRuntime {
             // Run apply_patch with a minimal environment for determinism and to avoid leaks.
             env: HashMap::new(),
             sandbox_permissions: SandboxPermissions::UseDefault,
-            additional_permissions: None,
+            additional_permissions: Some(additional_permissions),
             justification: None,
         })
+    }
+
+    fn create_patch_manifest(
+        patch: &str,
+    ) -> Result<(TempDir, PathBuf, PermissionProfile), ToolError> {
+        let manifest_dir = tempfile::Builder::new()
+            .prefix("codex-apply-patch-")
+            .tempdir()
+            .map_err(|err| {
+                ToolError::Rejected(format!(
+                    "failed to create patch tempdir in system temp: {err}"
+                ))
+            })?;
+        let manifest_root =
+            AbsolutePathBuf::from_absolute_path(manifest_dir.path()).map_err(|err| {
+                ToolError::Rejected(format!(
+                    "failed to resolve patch tempdir {}: {err}",
+                    manifest_dir.path().display()
+                ))
+            })?;
+        let manifest_path = manifest_dir.path().join("payload.patch");
+        std::fs::write(&manifest_path, patch).map_err(|err| {
+            ToolError::Rejected(format!(
+                "failed to write patch payload {}: {err}",
+                manifest_path.display()
+            ))
+        })?;
+        let additional_permissions = PermissionProfile {
+            file_system: Some(FileSystemPermissions {
+                read: Some(vec![manifest_root]),
+                write: None,
+            }),
+            ..Default::default()
+        };
+
+        Ok((manifest_dir, manifest_path, additional_permissions))
     }
 
     fn stdout_stream(ctx: &ToolCtx) -> Option<crate::exec::StdoutStream> {
@@ -215,21 +255,9 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
             return Ok(Self::apply_in_process(&req.action));
         }
 
-        let manifest_dir = tempfile::Builder::new()
-            .prefix("codex-apply-patch-")
-            .tempdir_in(&req.action.cwd)
-            .map_err(|err| {
-                ToolError::Rejected(format!("failed to create patch tempdir in cwd: {err}"))
-            })?;
-        let manifest_path = manifest_dir.path().join("payload.patch");
-        std::fs::write(&manifest_path, &req.action.patch).map_err(|err| {
-            ToolError::Rejected(format!(
-                "failed to write patch payload {}: {err}",
-                manifest_path.display()
-            ))
-        })?;
-
-        let spec = Self::build_command_spec(req, manifest_path)?;
+        let (manifest_dir, manifest_path, additional_permissions) =
+            Self::create_patch_manifest(&req.action.patch)?;
+        let spec = Self::build_command_spec(req, manifest_path, additional_permissions)?;
         let env = attempt
             .env_for(spec, None)
             .map_err(|err| ToolError::Codex(err.into()))?;
@@ -246,6 +274,7 @@ mod tests {
     use super::*;
     use codex_apply_patch::MaybeApplyPatchVerified;
     use codex_protocol::protocol::RejectConfig;
+    use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
     #[test]
@@ -288,5 +317,29 @@ mod tests {
         assert_eq!(written, format!("{content}\n"));
         assert!(output.stderr.text.is_empty());
         assert!(output.stdout.text.contains("large.txt"));
+    }
+
+    #[test]
+    fn create_patch_manifest_uses_system_temp_and_grants_read_access() {
+        let patch = "*** Begin Patch\n*** Add File: demo.txt\n+hello\n*** End Patch";
+
+        let (manifest_dir, manifest_path, additional_permissions) =
+            ApplyPatchRuntime::create_patch_manifest(patch).expect("create patch manifest");
+
+        assert!(manifest_path.starts_with(manifest_dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(&manifest_path).expect("read manifest"),
+            patch
+        );
+        assert_eq!(
+            additional_permissions.file_system,
+            Some(FileSystemPermissions {
+                read: Some(vec![
+                    AbsolutePathBuf::from_absolute_path(manifest_dir.path())
+                        .expect("absolute manifest dir"),
+                ]),
+                write: None,
+            })
+        );
     }
 }
