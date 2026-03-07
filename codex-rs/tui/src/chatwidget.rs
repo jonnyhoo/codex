@@ -4333,7 +4333,7 @@ impl ChatWidget {
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let statuses = tokio::task::spawn_blocking(move || {
-                codex_core::probe_lsp_provider_status(cwd.as_path(), codex_home.as_path())
+                codex_core::probe_lsp_provider_status(cwd.as_path(), None, codex_home.as_path())
             })
             .await
             .unwrap_or_default();

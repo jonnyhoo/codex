@@ -327,12 +327,8 @@ impl Drop for LspTransport {
 
 impl LspTransport {
     fn spawn(config: &LspServerConfig, workspace_root: &Path) -> Result<Self> {
-        let command = if Path::new(&config.command).is_absolute() {
-            PathBuf::from(&config.command)
-        } else {
-            which::which(&config.command)
-                .with_context(|| format!("language server command not found: {}", config.command))?
-        };
+        let command = resolve_command_path(&config.command)
+            .with_context(|| format!("language server command not found: {}", config.command))?;
 
         let mut command_builder = Command::new(&command);
         command_builder
@@ -646,24 +642,29 @@ pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf)
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or_else(default_timeout_ms));
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).max(1);
     let resolved_path = resolve_request_path(&cwd, request.path.as_deref())?;
-    let providers = load_provider_registry(&cwd, &codex_home);
+    let registry_base = provider_registry_base(&cwd, resolved_path.as_deref())?;
+    let providers = load_provider_registry(&registry_base, &codex_home);
 
     if request.action == LspAction::Providers {
-        let mut result: Vec<Value> = probe_provider_status(&cwd, &codex_home)
-            .into_iter()
-            .map(|provider| {
-                json!({
-                    "id": provider.id,
-                    "source": provider.source,
-                    "file_extensions": provider.file_extensions,
-                    "command_available": provider.command_available,
-                    "command": provider.command,
-                    "command_path": provider.command_path.map(|path| path.display().to_string()),
-                    "status": provider.status,
-                    "error": provider.error,
-                })
+        let mut result: Vec<Value> = probe_provider_status(
+            &cwd,
+            resolved_path.as_deref(),
+            &codex_home,
+        )
+        .into_iter()
+        .map(|provider| {
+            json!({
+                "id": provider.id,
+                "source": provider.source,
+                "file_extensions": provider.file_extensions,
+                "command_available": provider.command_available,
+                "command": provider.command,
+                "command_path": provider.command_path.map(|path| path.display().to_string()),
+                "status": provider.status,
+                "error": provider.error,
             })
-            .collect();
+        })
+        .collect();
         result.truncate(limit);
         return Ok(serde_json::to_string_pretty(&json!({
             "action": request.action.as_str(),
@@ -1013,10 +1014,19 @@ fn infer_auto_action(request: &LspToolRequest, resolved_path: Option<&Path>) -> 
 
 fn resolve_command_path(command: &str) -> Option<PathBuf> {
     let candidate = Path::new(command);
-    if candidate.is_absolute() {
-        return candidate.exists().then(|| candidate.to_path_buf());
+    let resolved = if candidate.is_absolute() {
+        candidate.exists().then(|| candidate.to_path_buf())
+    } else {
+        which::which(command).ok()
+    }?;
+
+    if is_rust_analyzer_proxy(&resolved, &cargo_bin_dirs_from_env())
+        && let Some(actual) = resolve_rustup_rust_analyzer()
+    {
+        return Some(actual);
     }
-    which::which(command).ok()
+
+    Some(resolved)
 }
 
 fn should_clear_rustup_toolchain(command: &Path) -> bool {
@@ -1108,6 +1118,17 @@ fn resolve_workspace_root(
         None => cwd.to_path_buf(),
     };
     Ok(find_workspace_root(starting_dir, provider))
+}
+
+fn provider_registry_base(cwd: &Path, path: Option<&Path>) -> Result<PathBuf> {
+    match path {
+        Some(path) if path.is_dir() => Ok(path.to_path_buf()),
+        Some(path) => path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow!("file has no parent directory")),
+        None => Ok(cwd.to_path_buf()),
+    }
 }
 
 fn find_workspace_root(start: PathBuf, provider: &LspProvider) -> PathBuf {
@@ -1291,14 +1312,23 @@ pub fn list_provider_status(cwd: &Path, codex_home: &Path) -> Vec<LspProviderSta
         .collect()
 }
 
-pub fn probe_provider_status(cwd: &Path, codex_home: &Path) -> Vec<LspProviderStatus> {
-    load_provider_registry(cwd, codex_home)
+pub fn probe_provider_status(
+    cwd: &Path,
+    path: Option<&Path>,
+    codex_home: &Path,
+) -> Vec<LspProviderStatus> {
+    let registry_base = provider_registry_base(cwd, path).unwrap_or_else(|_| cwd.to_path_buf());
+    load_provider_registry(&registry_base, codex_home)
         .into_iter()
-        .map(|provider| probe_single_provider_status(cwd, &provider))
+        .map(|provider| probe_single_provider_status(&registry_base, path, &provider))
         .collect()
 }
 
-fn probe_single_provider_status(cwd: &Path, provider: &LspProvider) -> LspProviderStatus {
+fn probe_single_provider_status(
+    cwd: &Path,
+    path: Option<&Path>,
+    provider: &LspProvider,
+) -> LspProviderStatus {
     let resolved_command = provider.resolved_command();
     let command_path = resolve_command_path(&resolved_command);
     let mut status = LspProviderStatus {
@@ -1317,8 +1347,9 @@ fn probe_single_provider_status(cwd: &Path, provider: &LspProvider) -> LspProvid
         return status;
     }
 
-    let workspace_root =
-        resolve_workspace_root(cwd, None, provider).unwrap_or_else(|_| cwd.to_path_buf());
+    let workspace_root = resolve_workspace_root(cwd, path, provider).unwrap_or_else(|_| {
+        provider_registry_base(cwd, path).unwrap_or_else(|_| cwd.to_path_buf())
+    });
     let server_config = match provider.resolve_server_config() {
         Ok(config) => config,
         Err(err) => {
@@ -1343,6 +1374,27 @@ fn probe_single_provider_status(cwd: &Path, provider: &LspProvider) -> LspProvid
     }
 
     status
+}
+
+fn resolve_rustup_rust_analyzer() -> Option<PathBuf> {
+    let output = Command::new("rustup")
+        .args(["which", "rust-analyzer"])
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+
+    let candidate = PathBuf::from(path);
+    candidate.exists().then_some(candidate)
 }
 
 fn provider_directories(cwd: &Path, codex_home: &Path) -> Vec<PathBuf> {
@@ -1700,6 +1752,64 @@ mod tests {
                 .iter()
                 .any(|provider| provider["id"] == json!("python"))
         );
+        assert!(
+            providers
+                .iter()
+                .any(|provider| provider["id"] == json!("java"))
+        );
+    }
+
+    #[test]
+    fn providers_action_uses_request_path_for_workspace_plugins() {
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let other_cwd = tempdir.path().join("other-cwd");
+        let codex_home = tempdir.path().join("codex-home");
+        let plugins_dir = workspace.join(".codex").join("lsp-providers");
+        std::fs::create_dir_all(&plugins_dir).expect("create plugin dir");
+        std::fs::create_dir_all(&other_cwd).expect("create alternate cwd");
+        std::fs::write(
+            plugins_dir.join("java.json"),
+            r#"{
+                "id": "java",
+                "aliases": ["java"],
+                "fileExtensions": ["java"],
+                "workspaceMarkers": ["pom.xml", "build.gradle"],
+                "command": "jdtls",
+                "args": ["-data", ".codex-java-workspace"],
+                "languageId": "java"
+            }"#,
+        )
+        .expect("write java provider plugin");
+
+        let output = super::invoke(
+            super::LspToolRequest {
+                action: super::LspAction::Providers,
+                path: Some(workspace.display().to_string()),
+                language: None,
+                goal: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                query: None,
+                new_name: None,
+                include_declaration: None,
+                limit: Some(20),
+                trigger_character: None,
+                only: Vec::new(),
+                timeout_ms: None,
+            },
+            other_cwd,
+            codex_home,
+        )
+        .expect("invoke providers action with request path");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("providers output should be valid json");
+        let providers = payload["providers"]
+            .as_array()
+            .expect("providers should be an array");
         assert!(
             providers
                 .iter()
