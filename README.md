@@ -30,6 +30,29 @@
 - `cargo check -p codex-tui`
 - 真实 LSP 测试已覆盖：Python、Go、TypeScript
 
+## Native Windows Dev
+
+这个 fork 已经按原生 Windows 开发路径做过一轮收口，但有几个前提要显式说明：
+
+- Rust workspace 根目录在 `codex-rs`，顶层 `justfile` 只是转发到这个 workspace
+- `js_repl` 需要 Node 版本满足 `codex-rs/node-version.txt`；如果系统 Node 偏旧，可以单独安装新的 Node，并通过 `js_repl_node_path` 或 `CODEX_JS_REPL_NODE_PATH` 指向它
+- `just fmt` / `just fix` 在原生 Windows 上建议通过仓库内脚本 `scripts\windows\just.cmd` 运行
+- 这个包装层会调用 Git Bash，但会先剔除 Git/MSYS 自带的 `/usr/bin/link.exe`，避免它抢在 MSVC `link.exe` 前面，导致 Rust 链接阶段失败
+
+推荐流程：
+
+```powershell
+cd E:\VIBE_CODING_WORK\codex
+cmd /c "\"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat\" && scripts\windows\just.cmd fmt"
+cmd /c "\"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat\" && scripts\windows\just.cmd fix -p codex-core"
+```
+
+工具安装建议：
+
+- `just`: 可以直接 `scoop install just`
+- `cargo-nextest`: Windows 上更建议直接下载官方 release 二进制放到 `~/.cargo/bin`，比 `cargo install` 更省 CPU
+- Git Bash 路径默认使用 `C:\Program Files\Git\bin\bash.exe`；如果你的安装位置不同，先设置 `CODEX_GIT_BASH`
+
 ## Continue Here
 
 后续修改请直接在这里追加：

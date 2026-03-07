@@ -4,7 +4,7 @@
 
 | Requirement                 | Details                                                         |
 | --------------------------- | --------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 **via WSL2** |
+| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, Windows 11 **via WSL2**, or native Windows 11 with MSVC build tools |
 | Git (optional, recommended) | 2.23+ for built-in PR helpers                                   |
 | RAM                         | 4-GB minimum (8-GB recommended)                                 |
 
@@ -48,6 +48,19 @@ just test
 # If you specifically want full feature coverage, use:
 cargo test --all-features
 ```
+
+### Native Windows note for this fork
+
+If you are building this fork on native Windows instead of WSL, run Rust commands from a Visual Studio developer shell (or after calling `vcvars64.bat`) so `link.exe` resolves to the MSVC toolchain.
+
+For `just fmt` / `just fix`, prefer the repo wrapper:
+
+```powershell
+cmd /c "\"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat\" && scripts\windows\just.cmd fmt"
+cmd /c "\"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat\" && scripts\windows\just.cmd fix -p codex-core"
+```
+
+That wrapper keeps Git Bash available for `just`, but strips the Git/MSYS directories that can otherwise shadow MSVC `link.exe` with `/usr/bin/link.exe`.
 
 ## Tracing / verbose logging
 
