@@ -11,17 +11,35 @@
 
 ## Current Changes
 
+### 代码智能
+
 - 内置 `lsp` tool，直接在 `codex-core` 中提供代码智能能力
-- 新增内置 `write_file` / `edit_file` tools，分别覆盖整文件重写和精确字符串替换场景
-- `read_file` / `list_dir` 升级为默认工具，减少对 shell 读文件和列目录的依赖
-- `apply_patch` 运行时改为通过临时 patch 文件自调用，避免 Windows 长命令行导致的失败
-- 增加 `lsp auto`，让 LLM 按自然语言问题自动选择合适的 LSP 操作
-- 增加 LSP provider registry，支持内置 provider + JSON 热插拔扩展
+- 增加 `lsp auto`，让模型按自然语言问题自动选择合适的 LSP 操作
+- 增加 LSP provider registry，支持内置 provider 和 JSON 热插拔扩展
 - 增加 provider 健康探测与状态查询
 - 增加 Java provider 示例：`.codex/lsp-providers/java.json.example`
+
+### 文件编辑
+
+- 新增内置 `write_file` / `edit_file` tools，分别覆盖整文件重写和精确字符串替换场景
+- `edit_file` 支持多重 edits、删除式 edit、`replace_all` 和更稳的模糊匹配
+- `edit_file` 在模糊匹配替换时会尽量保留目标代码块原始缩进
+- `read_file` / `list_dir` 升级为默认工具，减少对 shell 读文件和列目录的依赖
+
+### Patch 与运行时
+
+- `apply_patch` 运行时改为通过临时 patch 文件自调用，避免 Windows 长命令行导致的失败
+- 改善沙箱内 `apply_patch` 的执行可靠性
+
+### TUI 集成
+
 - TUI 集成 LSP 状态展示：`/status` 可查看启用语言与健康状态
 - TUI 启动后自动做 LSP 健康探测，并给出轻量通知
 - TUI 不再忽略 dynamic tool 事件，为后续更深的自动化能力打基础
+
+### Windows 与发布
+
+- 增加原生 Windows 开发包装脚本与说明
 - npm 发布链路已改成 fork 友好：默认发布到 `@jonnyhoo/codex`，并支持按本地 vendor 自动收窄平台包
 
 ## Validation
