@@ -151,7 +151,10 @@ impl LspProvider {
         Self {
             id: id.to_string(),
             source: "builtin".to_string(),
-            aliases: aliases.iter().map(std::string::ToString::to_string).collect(),
+            aliases: aliases
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             file_extensions: file_extensions
                 .iter()
                 .map(|value| normalize_extension(value))
@@ -161,7 +164,10 @@ impl LspProvider {
                 .map(std::string::ToString::to_string)
                 .collect(),
             default_command: default_command.to_string(),
-            default_args: default_args.iter().map(std::string::ToString::to_string).collect(),
+            default_args: default_args
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             command_env_var: Some(command_env_var.to_string()),
             args_env_var: Some(args_env_var.to_string()),
             default_language_id: default_language_id.to_string(),

@@ -471,13 +471,14 @@ fn split_lines_preserve_offsets(content: &str) -> Vec<LineSlice<'_>> {
 
     if !content.ends_with('\n')
         && let Some(tail) = content.get(start..)
-            && !tail.is_empty() {
-                lines.push(LineSlice {
-                    text: tail,
-                    start,
-                    end: content.len(),
-                });
-            }
+        && !tail.is_empty()
+    {
+        lines.push(LineSlice {
+            text: tail,
+            start,
+            end: content.len(),
+        });
+    }
 
     lines
 }
