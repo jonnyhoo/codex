@@ -2,6 +2,8 @@ pub(crate) mod agent_jobs;
 pub mod apply_patch;
 mod artifacts;
 mod dynamic;
+mod edit_file;
+mod file_change;
 mod grep_files;
 mod js_repl;
 mod list_dir;
@@ -17,6 +19,7 @@ mod shell;
 mod test_sync;
 pub(crate) mod unified_exec;
 mod view_image;
+mod write_file;
 
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 pub use plan::PLAN_TOOL;
@@ -33,6 +36,7 @@ pub use artifacts::ArtifactsHandler;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 pub use dynamic::DynamicToolHandler;
+pub use edit_file::EditFileHandler;
 pub use grep_files::GrepFilesHandler;
 pub use js_repl::JsReplHandler;
 pub use js_repl::JsReplResetHandler;
@@ -53,6 +57,7 @@ pub use shell::ShellHandler;
 pub use test_sync::TestSyncHandler;
 pub use unified_exec::UnifiedExecHandler;
 pub use view_image::ViewImageHandler;
+pub use write_file::WriteFileHandler;
 
 fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
 where

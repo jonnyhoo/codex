@@ -478,7 +478,10 @@ mod tests {
 
     fn normalize_diff_for_test(input: &str, root: &Path) -> String {
         let root_str = root.display().to_string().replace('\\', "/");
-        let replaced = input.replace(&root_str, "<TMP>");
+        let mut replaced = input.replace(&root_str, "<TMP>");
+        if let Some(relative_root) = root_relative_to_git_root(root) {
+            replaced = replaced.replace(&relative_root, "<TMP>");
+        }
         // Split into blocks on lines starting with "diff --git ", sort blocks for determinism, and rejoin
         let mut blocks: Vec<String> = Vec::new();
         let mut current = String::new();
@@ -501,6 +504,20 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn root_relative_to_git_root(root: &Path) -> Option<String> {
+        let mut cur = root;
+        loop {
+            let git_marker = cur.join(".git");
+            if git_marker.is_dir() || git_marker.is_file() {
+                return root
+                    .strip_prefix(cur)
+                    .ok()
+                    .map(|path| path.display().to_string().replace('\\', "/"));
+            }
+            cur = cur.parent()?;
+        }
     }
 
     #[test]

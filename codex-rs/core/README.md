@@ -44,7 +44,7 @@ Expects the binary containing `codex-core` to run the equivalent of `codex sandb
 
 ### All Platforms
 
-Expects the binary containing `codex-core` to simulate the virtual `apply_patch` CLI when `arg1` is `--codex-run-as-apply-patch`. See the `codex-arg0` crate for details.
+Expects the binary containing `codex-core` to simulate the virtual `apply_patch` CLI when `arg1` is `--codex-run-as-apply-patch`, and to support patch-file self invocation when `arg1` is `--codex-run-as-apply-patch-file`. See the `codex-arg0` crate for details.
 
 ## Local Changes
 
@@ -55,6 +55,9 @@ Expects the binary containing `codex-core` to simulate the virtual `apply_patch`
 当前变更包括：
 
 - 新增统一内置 `lsp` tool
+- 新增内置 `write_file` / `edit_file` tools，覆盖整文件重写与精确替换
+- `read_file` / `list_dir` 改成默认工具，减少对 shell 读本地文件和目录的依赖
+- `apply_patch` runtime 改成临时 patch 文件自调用，降低 Windows 长参数失败率
 - 新增 `action=auto`，按自然语言问题自动选择最合适的 LSP 操作
 - 新增 provider registry，支持内置 provider + JSON 热插拔扩展
 - 新增 provider 状态与健康探测接口，供 TUI 和其他前端查询当前语言可用性

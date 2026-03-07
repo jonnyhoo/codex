@@ -12,6 +12,9 @@
 ## Current Changes
 
 - 内置 `lsp` tool，直接在 `codex-core` 中提供代码智能能力
+- 新增内置 `write_file` / `edit_file` tools，分别覆盖整文件重写和精确字符串替换场景
+- `read_file` / `list_dir` 升级为默认工具，减少对 shell 读文件和列目录的依赖
+- `apply_patch` 运行时改为通过临时 patch 文件自调用，避免 Windows 长命令行导致的失败
 - 增加 `lsp auto`，让 LLM 按自然语言问题自动选择合适的 LSP 操作
 - 增加 LSP provider registry，支持内置 provider + JSON 热插拔扩展
 - 增加 provider 健康探测与状态查询

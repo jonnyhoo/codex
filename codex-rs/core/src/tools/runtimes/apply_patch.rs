@@ -5,6 +5,8 @@
 //! `codex --codex-run-as-apply-patch`, and runs under the current
 //! `SandboxAttempt` with a minimal environment.
 use crate::exec::ExecToolCallOutput;
+use crate::exec::SandboxType;
+use crate::exec::StreamOutput;
 use crate::sandboxing::CommandSpec;
 use crate::sandboxing::SandboxPermissions;
 use crate::sandboxing::execute_env;
@@ -19,7 +21,7 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_apply_patch::ApplyPatchAction;
-use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+use codex_apply_patch::CODEX_CORE_APPLY_PATCH_FILE_ARG1;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::ReviewDecision;
@@ -27,6 +29,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct ApplyPatchRequest {
@@ -46,7 +50,10 @@ impl ApplyPatchRuntime {
         Self
     }
 
-    fn build_command_spec(req: &ApplyPatchRequest) -> Result<CommandSpec, ToolError> {
+    fn build_command_spec(
+        req: &ApplyPatchRequest,
+        manifest_path: PathBuf,
+    ) -> Result<CommandSpec, ToolError> {
         use std::env;
         let exe = if let Some(path) = &req.codex_exe {
             path.clone()
@@ -58,8 +65,8 @@ impl ApplyPatchRuntime {
         Ok(CommandSpec {
             program,
             args: vec![
-                CODEX_CORE_APPLY_PATCH_ARG1.to_string(),
-                req.action.patch.clone(),
+                CODEX_CORE_APPLY_PATCH_FILE_ARG1.to_string(),
+                manifest_path.display().to_string(),
             ],
             cwd: req.action.cwd.clone(),
             expiration: req.timeout_ms.into(),
@@ -77,6 +84,49 @@ impl ApplyPatchRuntime {
             call_id: ctx.call_id.clone(),
             tx_event: ctx.session.get_tx_event(),
         })
+    }
+
+    fn apply_in_process(action: &ApplyPatchAction) -> ExecToolCallOutput {
+        let started_at = Instant::now();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        match codex_apply_patch::apply_action(action, &mut stdout, &mut stderr) {
+            Ok(()) => {
+                let stdout = String::from_utf8_lossy(&stdout).into_owned();
+                ExecToolCallOutput {
+                    exit_code: 0,
+                    stdout: StreamOutput::new(stdout.clone()),
+                    stderr: StreamOutput::new(String::new()),
+                    aggregated_output: StreamOutput::new(stdout),
+                    duration: started_at.elapsed(),
+                    timed_out: false,
+                }
+            }
+            Err(err) => {
+                let stderr = if stderr.is_empty() {
+                    err.to_string()
+                } else {
+                    String::from_utf8_lossy(&stderr).into_owned()
+                };
+                Self::failed_output(started_at.elapsed(), stderr)
+            }
+        }
+    }
+
+    fn failed_output(duration: Duration, message: String) -> ExecToolCallOutput {
+        let stderr = if message.ends_with('\n') {
+            message
+        } else {
+            format!("{message}\n")
+        };
+        ExecToolCallOutput {
+            exit_code: 1,
+            stdout: StreamOutput::new(String::new()),
+            stderr: StreamOutput::new(stderr.clone()),
+            aggregated_output: StreamOutput::new(stderr),
+            duration,
+            timed_out: false,
+        }
     }
 }
 
@@ -159,13 +209,34 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
     ) -> Result<ExecToolCallOutput, ToolError> {
-        let spec = Self::build_command_spec(req)?;
+        if attempt.sandbox == SandboxType::None {
+            // Avoid command-line length failures by applying verified absolute-path changes
+            // directly when no sandbox execution is required.
+            return Ok(Self::apply_in_process(&req.action));
+        }
+
+        let manifest_dir = tempfile::Builder::new()
+            .prefix("codex-apply-patch-")
+            .tempdir_in(&req.action.cwd)
+            .map_err(|err| {
+                ToolError::Rejected(format!("failed to create patch tempdir in cwd: {err}"))
+            })?;
+        let manifest_path = manifest_dir.path().join("payload.patch");
+        std::fs::write(&manifest_path, &req.action.patch).map_err(|err| {
+            ToolError::Rejected(format!(
+                "failed to write patch payload {}: {err}",
+                manifest_path.display()
+            ))
+        })?;
+
+        let spec = Self::build_command_spec(req, manifest_path)?;
         let env = attempt
             .env_for(spec, None)
             .map_err(|err| ToolError::Codex(err.into()))?;
         let out = execute_env(env, Self::stdout_stream(ctx))
             .await
             .map_err(ToolError::Codex)?;
+        drop(manifest_dir);
         Ok(out)
     }
 }
@@ -173,7 +244,9 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_apply_patch::MaybeApplyPatchVerified;
     use codex_protocol::protocol::RejectConfig;
+    use tempfile::tempdir;
 
     #[test]
     fn wants_no_sandbox_approval_reject_respects_sandbox_flag() {
@@ -193,5 +266,27 @@ mod tests {
                 mcp_elicitations: false,
             }))
         );
+    }
+
+    #[test]
+    fn apply_in_process_handles_large_verified_patch() {
+        let dir = tempdir().expect("tmpdir");
+        let content = "x".repeat(40_000);
+        let patch =
+            format!("*** Begin Patch\n*** Add File: nested/large.txt\n+{content}\n*** End Patch");
+        let argv = vec!["apply_patch".to_string(), patch];
+        let action = match codex_apply_patch::maybe_parse_apply_patch_verified(&argv, dir.path()) {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified patch action, got {other:?}"),
+        };
+
+        let output = ApplyPatchRuntime::apply_in_process(&action);
+        assert_eq!(output.exit_code, 0);
+
+        let written = std::fs::read_to_string(dir.path().join("nested").join("large.txt"))
+            .expect("read patched file");
+        assert_eq!(written, format!("{content}\n"));
+        assert!(output.stderr.text.is_empty());
+        assert!(output.stdout.text.contains("large.txt"));
     }
 }

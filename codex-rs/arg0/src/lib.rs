@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+use codex_apply_patch::CODEX_CORE_APPLY_PATCH_FILE_ARG1;
 use codex_utils_home_dir::find_codex_home;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -100,6 +101,36 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
             }
             None => {
                 eprintln!("Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a UTF-8 PATCH argument.");
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+    if argv1 == CODEX_CORE_APPLY_PATCH_FILE_ARG1 {
+        let patch_path = args.next().map(PathBuf::from);
+        let exit_code = match patch_path {
+            Some(patch_path) => {
+                let patch_arg = std::fs::read_to_string(&patch_path);
+                match patch_arg {
+                    Ok(patch_arg) => {
+                        let mut stdout = std::io::stdout();
+                        let mut stderr = std::io::stderr();
+                        match codex_apply_patch::apply_patch(&patch_arg, &mut stdout, &mut stderr) {
+                            Ok(()) => 0,
+                            Err(_) => 1,
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "Error: failed to read patch file {}: {err}",
+                            patch_path.display()
+                        );
+                        1
+                    }
+                }
+            }
+            None => {
+                eprintln!("Error: {CODEX_CORE_APPLY_PATCH_FILE_ARG1} requires a patch file path.");
                 1
             }
         };

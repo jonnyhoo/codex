@@ -1375,6 +1375,103 @@ fn create_read_file_tool() -> ToolSpec {
     })
 }
 
+fn create_write_file_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "file_path".to_string(),
+            JsonSchema::String {
+                description: Some("Absolute path to the file to create or replace.".to_string()),
+            },
+        ),
+        (
+            "content".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Complete file contents to write. Use this when creating a file or rewriting most of an existing file."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "write_file".to_string(),
+        description:
+            "Creates a new local text file or replaces the full contents of an existing local text file."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["file_path".to_string(), "content".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_edit_file_tool() -> ToolSpec {
+    let edit_properties = BTreeMap::from([
+        (
+            "old_text".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Existing text to replace. Provide enough surrounding context to make the match unique."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "new_text".to_string(),
+            JsonSchema::String {
+                description: Some("Replacement text for this edit.".to_string()),
+            },
+        ),
+        (
+            "replace_all".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, replace every exact occurrence of old_text instead of requiring a unique match."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    let properties = BTreeMap::from([
+        (
+            "file_path".to_string(),
+            JsonSchema::String {
+                description: Some("Absolute path to the existing file to edit.".to_string()),
+            },
+        ),
+        (
+            "edits".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::Object {
+                    properties: edit_properties,
+                    required: Some(vec!["old_text".to_string(), "new_text".to_string()]),
+                    additional_properties: Some(false.into()),
+                }),
+                description: Some(
+                    "One or more exact text replacements to apply sequentially to the file."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "edit_file".to_string(),
+        description: "Applies one or more exact text replacements to an existing local text file."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["file_path".to_string(), "edits".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_list_dir_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -1953,6 +2050,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ApplyPatchHandler;
     use crate::tools::handlers::ArtifactsHandler;
     use crate::tools::handlers::DynamicToolHandler;
+    use crate::tools::handlers::EditFileHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::JsReplHandler;
     use crate::tools::handlers::JsReplResetHandler;
@@ -1970,6 +2068,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::handlers::ViewImageHandler;
+    use crate::tools::handlers::WriteFileHandler;
     use std::sync::Arc;
 
     let mut builder = ToolRegistryBuilder::new();
@@ -1991,6 +2090,8 @@ pub(crate) fn build_specs(
     let js_repl_reset_handler = Arc::new(JsReplResetHandler);
     let lsp_handler = Arc::new(LspHandler);
     let artifacts_handler = Arc::new(ArtifactsHandler);
+    let edit_file_handler = Arc::new(EditFileHandler);
+    let write_file_handler = Arc::new(WriteFileHandler);
     let request_permission_enabled = config.request_permission_enabled;
 
     match &config.shell_type {
@@ -2066,6 +2167,10 @@ pub(crate) fn build_specs(
 
     builder.push_spec_with_parallel_support(create_lsp_tool(), true);
     builder.register_handler("lsp", lsp_handler);
+    builder.push_spec(create_write_file_tool());
+    builder.push_spec(create_edit_file_tool());
+    builder.register_handler("write_file", write_file_handler);
+    builder.register_handler("edit_file", edit_file_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -2088,24 +2193,13 @@ pub(crate) fn build_specs(
         builder.register_handler("grep_files", grep_files_handler);
     }
 
-    if config
-        .experimental_supported_tools
-        .contains(&"read_file".to_string())
-    {
-        let read_file_handler = Arc::new(ReadFileHandler);
-        builder.push_spec_with_parallel_support(create_read_file_tool(), true);
-        builder.register_handler("read_file", read_file_handler);
-    }
+    let read_file_handler = Arc::new(ReadFileHandler);
+    builder.push_spec_with_parallel_support(create_read_file_tool(), true);
+    builder.register_handler("read_file", read_file_handler);
 
-    if config
-        .experimental_supported_tools
-        .iter()
-        .any(|tool| tool == "list_dir")
-    {
-        let list_dir_handler = Arc::new(ListDirHandler);
-        builder.push_spec_with_parallel_support(create_list_dir_tool(), true);
-        builder.register_handler("list_dir", list_dir_handler);
-    }
+    let list_dir_handler = Arc::new(ListDirHandler);
+    builder.push_spec_with_parallel_support(create_list_dir_tool(), true);
+    builder.register_handler("list_dir", list_dir_handler);
 
     if config
         .experimental_supported_tools
@@ -2417,7 +2511,12 @@ mod tests {
             create_write_stdin_tool(),
             PLAN_TOOL.clone(),
             create_request_user_input_tool(CollaborationModesConfig::default()),
+            create_lsp_tool(),
+            create_write_file_tool(),
+            create_edit_file_tool(),
             create_apply_patch_freeform_tool(),
+            create_read_file_tool(),
+            create_list_dir_tool(),
             ToolSpec::WebSearch {
                 external_web_access: Some(true),
                 search_content_types: None,
@@ -2857,7 +2956,12 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2875,7 +2979,12 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2895,7 +3004,12 @@ mod tests {
                 "write_stdin",
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2915,7 +3029,12 @@ mod tests {
                 "write_stdin",
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2933,7 +3052,12 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2951,7 +3075,12 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2969,6 +3098,11 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -2986,7 +3120,12 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3006,7 +3145,12 @@ mod tests {
                 "write_stdin",
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
+                "read_file",
+                "list_dir",
                 "web_search",
                 "view_image",
             ],
@@ -3082,6 +3226,8 @@ mod tests {
         assert!(find_tool(&tools, "grep_files").supports_parallel_tool_calls);
         assert!(find_tool(&tools, "list_dir").supports_parallel_tool_calls);
         assert!(find_tool(&tools, "read_file").supports_parallel_tool_calls);
+        assert!(!find_tool(&tools, "write_file").supports_parallel_tool_calls);
+        assert!(!find_tool(&tools, "edit_file").supports_parallel_tool_calls);
     }
 
     #[test]

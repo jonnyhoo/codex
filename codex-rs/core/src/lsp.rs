@@ -19,6 +19,8 @@ use std::process::ChildStdin;
 use std::process::ChildStdout;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvTimeoutError;
@@ -44,6 +46,7 @@ const DEFAULT_CODE_ACTION_KINDS: [&str; 7] = [
 const WORKSPACE_PROVIDER_DIR_RELATIVE: [&str; 2] = [".codex", "lsp-providers"];
 const USER_PROVIDER_DIR_NAME: &str = "lsp-providers";
 const PROVIDER_DIRS_ENV_VAR: &str = "CODEX_LSP_PROVIDER_DIRS";
+const LSP_STDERR_TAIL_LIMIT: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -148,17 +151,17 @@ impl LspProvider {
         Self {
             id: id.to_string(),
             source: "builtin".to_string(),
-            aliases: aliases.iter().map(|value| value.to_string()).collect(),
+            aliases: aliases.iter().map(std::string::ToString::to_string).collect(),
             file_extensions: file_extensions
                 .iter()
                 .map(|value| normalize_extension(value))
                 .collect(),
             workspace_markers: workspace_markers
                 .iter()
-                .map(|value| value.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             default_command: default_command.to_string(),
-            default_args: default_args.iter().map(|value| value.to_string()).collect(),
+            default_args: default_args.iter().map(std::string::ToString::to_string).collect(),
             command_env_var: Some(command_env_var.to_string()),
             args_env_var: Some(args_env_var.to_string()),
             default_language_id: default_language_id.to_string(),
@@ -304,6 +307,7 @@ struct LspTransport {
     child: Child,
     stdin: ChildStdin,
     events: Receiver<ReaderEvent>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
     next_id: i64,
     diagnostics_by_uri: HashMap<String, Value>,
 }
@@ -324,12 +328,18 @@ impl LspTransport {
                 .with_context(|| format!("language server command not found: {}", config.command))?
         };
 
-        let mut child = Command::new(&command)
+        let mut command_builder = Command::new(&command);
+        command_builder
             .args(&config.args)
             .current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if should_clear_rustup_toolchain(&command) {
+            command_builder.env_remove("RUSTUP_TOOLCHAIN");
+        }
+
+        let mut child = command_builder
             .spawn()
             .with_context(|| format!("failed to start language server: {}", command.display()))?;
 
@@ -346,12 +356,13 @@ impl LspTransport {
             .take()
             .ok_or_else(|| anyhow!("failed to capture language server stderr"))?;
         let events = spawn_reader(stdout);
-        drain_stderr(stderr);
+        let stderr_tail = drain_stderr(stderr);
 
         Ok(Self {
             child,
             stdin,
             events,
+            stderr_tail,
             next_id: 1,
             diagnostics_by_uri: HashMap::new(),
         })
@@ -521,7 +532,7 @@ impl LspTransport {
                     }
                     let _ = self.handle_message(message)?;
                 }
-                Some(ReaderEvent::Closed) => bail!("language server closed before responding"),
+                Some(ReaderEvent::Closed) => return Err(self.closed_before_responding_error()),
                 Some(ReaderEvent::Error(message)) => bail!(message),
                 None => bail!("LSP request timed out: {method}"),
             }
@@ -539,6 +550,23 @@ impl LspTransport {
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Ok(Some(ReaderEvent::Closed)),
         }
+    }
+
+    fn closed_before_responding_error(&self) -> anyhow::Error {
+        let stderr_tail = self.stderr_tail();
+        if stderr_tail.is_empty() {
+            anyhow!("language server closed before responding")
+        } else {
+            anyhow!("language server closed before responding; stderr tail:\n{stderr_tail}")
+        }
+    }
+
+    fn stderr_tail(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+            .unwrap_or_default()
     }
 
     fn handle_message(&mut self, message: Value) -> Result<bool> {
@@ -985,6 +1013,35 @@ fn resolve_command_path(command: &str) -> Option<PathBuf> {
     which::which(command).ok()
 }
 
+fn should_clear_rustup_toolchain(command: &Path) -> bool {
+    env::var_os("RUSTUP_TOOLCHAIN").is_some()
+        && is_rust_analyzer_proxy(command, &cargo_bin_dirs_from_env())
+}
+
+fn is_rust_analyzer_proxy(command: &Path, cargo_bin_dirs: &[PathBuf]) -> bool {
+    command
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "rust-analyzer" | "rust-analyzer.exe"))
+        && cargo_bin_dirs.iter().any(|dir| command.starts_with(dir))
+}
+
+fn cargo_bin_dirs_from_env() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(cargo_home) = env::var_os("CARGO_HOME") {
+        dirs.push(PathBuf::from(cargo_home).join("bin"));
+    }
+    if let Some(user_profile) = env::var_os("USERPROFILE") {
+        dirs.push(PathBuf::from(user_profile).join(".cargo").join("bin"));
+    }
+    if let Some(home) = env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".cargo").join("bin"));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 fn resolve_request_path(cwd: &Path, path: Option<&str>) -> Result<Option<PathBuf>> {
     let Some(path) = path else {
         return Ok(None);
@@ -1379,12 +1436,29 @@ fn spawn_reader(stdout: ChildStdout) -> Receiver<ReaderEvent> {
     receiver
 }
 
-fn drain_stderr(stderr: ChildStderr) {
+fn drain_stderr(stderr: ChildStderr) -> Arc<Mutex<Vec<u8>>> {
+    let tail = Arc::new(Mutex::new(Vec::new()));
+    let tail_writer = Arc::clone(&tail);
     thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        let mut sink = std::io::sink();
-        let _ = std::io::copy(&mut reader, &mut sink);
+        let mut buf = [0u8; 1024];
+        loop {
+            let bytes_read = match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(bytes_read) => bytes_read,
+                Err(_) => break,
+            };
+            let Ok(mut tail) = tail_writer.lock() else {
+                break;
+            };
+            tail.extend_from_slice(&buf[..bytes_read]);
+            if tail.len() > LSP_STDERR_TAIL_LIMIT {
+                let remove = tail.len() - LSP_STDERR_TAIL_LIMIT;
+                tail.drain(..remove);
+            }
+        }
     });
+    tail
 }
 
 fn read_lsp_message(reader: &mut impl BufRead) -> Result<Option<Value>> {
@@ -1499,6 +1573,7 @@ mod tests {
     use super::normalize_value_for_output;
     use serde_json::json;
     use std::path::Path;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -1685,7 +1760,7 @@ mod tests {
                 only: Vec::new(),
                 timeout_ms: Some(30000),
             },
-            workspace.clone(),
+            workspace,
             tempdir.path().join("codex-home"),
         )
         .expect("invoke go document symbols");
@@ -1735,7 +1810,7 @@ mod tests {
                 only: Vec::new(),
                 timeout_ms: Some(30000),
             },
-            workspace.clone(),
+            workspace,
             tempdir.path().join("codex-home"),
         )
         .expect("invoke document symbols");
@@ -1752,6 +1827,37 @@ mod tests {
         assert!(names.contains(&"helper"));
         assert!(names.contains(&"main"));
     }
+
+    #[test]
+    fn detects_rust_analyzer_rustup_proxy_from_cargo_bin() {
+        #[cfg(windows)]
+        let command = PathBuf::from(r"C:\Users\alice\.cargo\bin\rust-analyzer.exe");
+        #[cfg(windows)]
+        let cargo_bin = PathBuf::from(r"C:\Users\alice\.cargo\bin");
+
+        #[cfg(not(windows))]
+        let command = PathBuf::from("/home/alice/.cargo/bin/rust-analyzer");
+        #[cfg(not(windows))]
+        let cargo_bin = PathBuf::from("/home/alice/.cargo/bin");
+
+        assert!(super::is_rust_analyzer_proxy(&command, &[cargo_bin]));
+    }
+
+    #[test]
+    fn ignores_non_rust_analyzer_commands_in_cargo_bin() {
+        #[cfg(windows)]
+        let command = PathBuf::from(r"C:\Users\alice\.cargo\bin\gopls.exe");
+        #[cfg(windows)]
+        let cargo_bin = PathBuf::from(r"C:\Users\alice\.cargo\bin");
+
+        #[cfg(not(windows))]
+        let command = PathBuf::from("/home/alice/.cargo/bin/gopls");
+        #[cfg(not(windows))]
+        let cargo_bin = PathBuf::from("/home/alice/.cargo/bin");
+
+        assert!(!super::is_rust_analyzer_proxy(&command, &[cargo_bin]));
+    }
+
     #[test]
     fn diagnostics_returns_python_type_errors_when_pyright_available() {
         if super::resolve_command_path("pyright-langserver").is_none() {
@@ -1783,7 +1889,7 @@ mod tests {
                 only: Vec::new(),
                 timeout_ms: Some(30000),
             },
-            workspace.clone(),
+            workspace,
             tempdir.path().join("codex-home"),
         )
         .expect("invoke python diagnostics");
@@ -1842,7 +1948,7 @@ mod tests {
                 only: Vec::new(),
                 timeout_ms: Some(30000),
             },
-            workspace.clone(),
+            workspace,
             tempdir.path().join("codex-home"),
         )
         .expect("invoke typescript document symbols");

@@ -18,6 +18,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
 use tempfile::tempdir;
 use wiremock::MockServer;
 
@@ -84,6 +85,27 @@ fn write_too_old_node_script(dir: &Path) -> Result<std::path::PathBuf> {
     {
         anyhow::bail!("unsupported platform for js_repl test fixture");
     }
+}
+
+fn has_compatible_js_repl_runtime() -> bool {
+    let node = std::env::var_os("CODEX_JS_REPL_NODE_PATH").unwrap_or_else(|| "node".into());
+    let output = Command::new(node).arg("--version").output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    let version = version.trim().trim_start_matches('v');
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    (major, minor, patch) >= (22, 22, 0)
 }
 
 async fn run_js_repl_turn(
@@ -243,6 +265,9 @@ async fn js_repl_is_not_advertised_when_startup_node_is_incompatible() -> Result
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_persists_top_level_destructured_bindings_and_supports_tla() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -267,6 +292,9 @@ async fn js_repl_persists_top_level_destructured_bindings_and_supports_tla() -> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_failed_cells_commit_initialized_bindings_only() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -293,6 +321,9 @@ async fn js_repl_failed_cells_commit_initialized_bindings_only() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_failed_cells_preserve_initialized_lexical_destructuring_bindings() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -320,6 +351,9 @@ async fn js_repl_failed_cells_preserve_initialized_lexical_destructuring_binding
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_link_failures_keep_prior_module_state() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -347,6 +381,9 @@ async fn js_repl_link_failures_keep_prior_module_state() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_failed_cells_do_not_commit_unreached_hoisted_bindings() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -375,6 +412,9 @@ async fn js_repl_failed_cells_do_not_commit_unreached_hoisted_bindings() -> Resu
 async fn js_repl_failed_cells_do_not_preserve_hoisted_function_reads_before_declaration()
 -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -403,6 +443,9 @@ async fn js_repl_failed_cells_do_not_preserve_hoisted_function_reads_before_decl
 async fn js_repl_failed_cells_preserve_functions_when_declaration_sites_are_reached() -> Result<()>
 {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -424,6 +467,9 @@ async fn js_repl_failed_cells_preserve_functions_when_declaration_sites_are_reac
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_failed_cells_preserve_prior_binding_writes_without_new_bindings() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -447,6 +493,9 @@ async fn js_repl_failed_cells_preserve_prior_binding_writes_without_new_bindings
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_failed_cells_var_persistence_boundaries() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let cases = [
@@ -499,6 +548,9 @@ async fn js_repl_failed_cells_var_persistence_boundaries() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_failed_cells_commit_non_empty_loop_vars_but_skip_empty_loops() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mocks = run_js_repl_sequence(
@@ -526,6 +578,9 @@ async fn js_repl_failed_cells_commit_non_empty_loop_vars_but_skip_empty_loops() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_keeps_function_to_string_stable() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mock = run_js_repl_turn(
@@ -549,6 +604,9 @@ async fn js_repl_keeps_function_to_string_stable() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_allows_globalthis_shadowing_with_instrumented_bindings() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mock = run_js_repl_turn(
@@ -570,6 +628,9 @@ async fn js_repl_allows_globalthis_shadowing_with_instrumented_bindings() -> Res
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_can_invoke_builtin_tools() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mock = run_js_repl_turn(
@@ -597,6 +658,9 @@ async fn js_repl_can_invoke_builtin_tools() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_tool_call_rejects_recursive_js_repl_invocation() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mock = run_js_repl_turn(
@@ -638,6 +702,9 @@ try {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_does_not_expose_process_global() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mock = run_js_repl_turn(
@@ -662,6 +729,9 @@ async fn js_repl_does_not_expose_process_global() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn js_repl_blocks_sensitive_builtin_imports() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if !has_compatible_js_repl_runtime() {
+        return Ok(());
+    }
 
     let server = responses::start_mock_server().await;
     let mock = run_js_repl_turn(

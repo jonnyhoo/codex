@@ -33,6 +33,7 @@ pub const APPLY_PATCH_TOOL_INSTRUCTIONS: &str = include_str!("../apply_patch_too
 /// process-invocation contract between the apply-patch runtime and the arg0
 /// dispatcher.
 pub const CODEX_CORE_APPLY_PATCH_ARG1: &str = "--codex-run-as-apply-patch";
+pub const CODEX_CORE_APPLY_PATCH_FILE_ARG1: &str = "--codex-run-as-apply-patch-file";
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ApplyPatchError {
@@ -147,6 +148,28 @@ impl ApplyPatchAction {
         &self.changes
     }
 
+    pub fn from_changes(
+        changes: HashMap<PathBuf, ApplyPatchFileChange>,
+        cwd: PathBuf,
+        patch: String,
+    ) -> Result<Self, ApplyPatchError> {
+        if changes.keys().any(|path| !path.is_absolute()) {
+            return Err(ApplyPatchError::IoError(IoError {
+                context: "apply_patch actions require absolute paths".to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "non-absolute path in apply_patch action",
+                ),
+            }));
+        }
+
+        Ok(Self {
+            changes,
+            patch,
+            cwd,
+        })
+    }
+
     /// Should be used exclusively for testing. (Not worth the overhead of
     /// creating a feature flag for this.)
     pub fn new_add_for_test(path: &Path, content: String) -> Self {
@@ -210,6 +233,32 @@ pub fn apply_patch(
     apply_hunks(&hunks, stdout, stderr)?;
 
     Ok(())
+}
+
+pub fn apply_action(
+    action: &ApplyPatchAction,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+) -> Result<(), ApplyPatchError> {
+    match apply_action_to_files(action) {
+        Ok(affected) => {
+            print_summary_relative_to_cwd(&affected, &action.cwd, stdout)
+                .map_err(ApplyPatchError::from)?;
+            Ok(())
+        }
+        Err(err) => {
+            let message = err.to_string();
+            writeln!(stderr, "{message}").map_err(ApplyPatchError::from)?;
+            if let Some(io) = err.downcast_ref::<std::io::Error>() {
+                Err(ApplyPatchError::from(io))
+            } else {
+                Err(ApplyPatchError::IoError(IoError {
+                    context: message.clone(),
+                    source: std::io::Error::other(message),
+                }))
+            }
+        }
+    }
 }
 
 /// Applies hunks and continues to update stdout/stderr
@@ -331,6 +380,68 @@ fn apply_hunks_to_files(hunks: &[Hunk]) -> anyhow::Result<AffectedPaths> {
             }
         }
     }
+    Ok(AffectedPaths {
+        added,
+        modified,
+        deleted,
+    })
+}
+
+pub fn apply_action_to_files(action: &ApplyPatchAction) -> anyhow::Result<AffectedPaths> {
+    if action.is_empty() {
+        anyhow::bail!("No files were modified.");
+    }
+
+    let mut added: Vec<PathBuf> = Vec::new();
+    let mut modified: Vec<PathBuf> = Vec::new();
+    let mut deleted: Vec<PathBuf> = Vec::new();
+
+    for (path, change) in action.changes() {
+        match change {
+            ApplyPatchFileChange::Add { content } => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create parent directories for {}", path.display())
+                    })?;
+                }
+                std::fs::write(path, content)
+                    .with_context(|| format!("Failed to write file {}", path.display()))?;
+                added.push(path.clone());
+            }
+            ApplyPatchFileChange::Delete { .. } => {
+                std::fs::remove_file(path)
+                    .with_context(|| format!("Failed to delete file {}", path.display()))?;
+                deleted.push(path.clone());
+            }
+            ApplyPatchFileChange::Update {
+                move_path,
+                new_content,
+                ..
+            } => {
+                if let Some(dest) = move_path {
+                    if let Some(parent) = dest.parent()
+                        && !parent.as_os_str().is_empty()
+                    {
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("Failed to create parent directories for {}", dest.display())
+                        })?;
+                    }
+                    std::fs::write(dest, new_content)
+                        .with_context(|| format!("Failed to write file {}", dest.display()))?;
+                    std::fs::remove_file(path)
+                        .with_context(|| format!("Failed to remove original {}", path.display()))?;
+                    modified.push(dest.clone());
+                } else {
+                    std::fs::write(path, new_content)
+                        .with_context(|| format!("Failed to write file {}", path.display()))?;
+                    modified.push(path.clone());
+                }
+            }
+        }
+    }
+
     Ok(AffectedPaths {
         added,
         modified,
@@ -551,6 +662,33 @@ pub fn print_summary(
     Ok(())
 }
 
+fn print_summary_relative_to_cwd(
+    affected: &AffectedPaths,
+    cwd: &Path,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    writeln!(out, "Success. Updated the following files:")?;
+    for path in &affected.added {
+        writeln!(out, "A {}", display_summary_path(path, cwd))?;
+    }
+    for path in &affected.modified {
+        writeln!(out, "M {}", display_summary_path(path, cwd))?;
+    }
+    for path in &affected.deleted {
+        writeln!(out, "D {}", display_summary_path(path, cwd))?;
+    }
+    Ok(())
+}
+
+fn display_summary_path(path: &Path, cwd: &Path) -> String {
+    path.strip_prefix(cwd)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +726,32 @@ mod tests {
         assert_eq!(stderr_str, "");
         let contents = fs::read_to_string(path).unwrap();
         assert_eq!(contents, "ab\ncd\n");
+    }
+
+    #[test]
+    fn apply_action_summary_uses_paths_relative_to_cwd() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let path = cwd.join("nested").join("new.txt");
+        let patch = "*** Begin Patch\n*** Add File: nested/new.txt\n+created\n*** End Patch";
+        let changes = HashMap::from([(
+            path.clone(),
+            ApplyPatchFileChange::Add {
+                content: "created\n".to_string(),
+            },
+        )]);
+        let action = ApplyPatchAction::from_changes(changes, cwd, patch.to_string()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        apply_action(&action, &mut stdout, &mut stderr).unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "Success. Updated the following files:\nA nested/new.txt\n"
+        );
+        assert_eq!(String::from_utf8(stderr).unwrap(), "");
+        assert_eq!(fs::read_to_string(path).unwrap(), "created\n");
     }
 
     #[test]

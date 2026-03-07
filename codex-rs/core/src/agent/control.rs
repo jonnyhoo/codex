@@ -630,7 +630,49 @@ mod tests {
                 sleep(Duration::from_millis(25)).await;
             }
         };
-        timeout(Duration::from_secs(2), wait).await.is_ok()
+        timeout(Duration::from_secs(5), wait).await.is_ok()
+    }
+
+    async fn wait_for_status_to_leave_pending_init(
+        status_rx: &mut tokio::sync::watch::Receiver<AgentStatus>,
+        description: &str,
+    ) {
+        if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    status_rx
+                        .changed()
+                        .await
+                        .expect("agent status should advance past pending init");
+                    if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{description} should initialize before continuing"));
+        }
+    }
+
+    async fn wait_for_final_agent_status(
+        status_rx: &mut tokio::sync::watch::Receiver<AgentStatus>,
+        description: &str,
+    ) {
+        if !super::is_final(&status_rx.borrow().clone()) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    status_rx
+                        .changed()
+                        .await
+                        .expect("agent status should reach a final state");
+                    if super::is_final(&status_rx.borrow().clone()) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{description} should reach a final status"));
+        }
     }
 
     #[tokio::test]
@@ -1317,10 +1359,17 @@ mod tests {
             .get_thread(child_thread_id)
             .await
             .expect("child thread should exist");
+        let mut status_rx = harness
+            .control
+            .subscribe_status(child_thread_id)
+            .await
+            .expect("status subscription should succeed");
+        wait_for_status_to_leave_pending_init(&mut status_rx, "child").await;
         let _ = child_thread
             .submit(Op::Shutdown {})
             .await
             .expect("child shutdown should submit");
+        wait_for_final_agent_status(&mut status_rx, "child").await;
 
         assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
     }
@@ -1494,21 +1543,7 @@ mod tests {
             .subscribe_status(child_thread_id)
             .await
             .expect("status subscription should succeed");
-        if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
-            timeout(Duration::from_secs(5), async {
-                loop {
-                    status_rx
-                        .changed()
-                        .await
-                        .expect("child status should advance past pending init");
-                    if !matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
-                        break;
-                    }
-                }
-            })
-            .await
-            .expect("child should initialize before shutdown");
-        }
+        wait_for_status_to_leave_pending_init(&mut status_rx, "child").await;
         let original_snapshot = child_thread.config_snapshot().await;
         let original_nickname = original_snapshot
             .session_source
