@@ -5,7 +5,7 @@
 ## Base
 
 - Upstream: `openai/codex`
-- Source version marker: `codex-cli 0.2.0`
+- Source version marker: `codex-cli 0.2.1`
 - Local validation reference: `codex-cli 0.111.0`
 - npm package: `@jonnyhoo/codex`
 

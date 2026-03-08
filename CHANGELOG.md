@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.1
+
+这个版本不继续扩大 LSP 常驻负担，而是针对 Rust 语言服务在 CLI 冷启动阶段最容易出现的“空结果”问题做收敛修复，重点是让现有 built-in LSP 更稳、更像 IDE，而不是更重。
+
+### Rust LSP Reliability
+
+- 当 Rust `hover` 或 `workspace_symbols` 在冷启动时返回空结果，增加有界重试，只在观察到 `$/progress` 后短暂等待，不做无上限阻塞
+- `workspace_symbols` 在 Rust 空结果时，允许回退到当前文件的 `document_symbols` 做轻量匹配
+- `hover` 在 Rust 空结果时，允许从当前文件最深层的 `document_symbol` 回退生成最小可用信息
+- 回退逻辑只在 Rust 空结果场景触发，不扩大其他语言和正常请求的常驻开销
+
+### Workspace Settings Compatibility
+
+- 支持向上查找祖先目录的 `.vscode/settings.json`
+- 支持展开 `${workspaceFolder}`、`${workspaceRoot}`、`${workspaceFolderBasename}`
+- 修正 Windows 下 `${workspaceFolder}/...` 这类路径变量的分隔符归一化
+
+### Validation
+
+- 新增 Rust LSP 冷启动回退相关单测
+- `codex-core` 已通过 `cargo test -p codex-core --lib lsp::tests::`
+- `codex-core` 已通过 `cargo clippy -p codex-core --lib -- -D warnings`
+- `codex-cli` 已通过常规构建和真实 CLI `workspace_symbols` / `hover` 冒烟验证
+
 ## v0.2.0
 
 这个版本在 `v0.1.0` 的基础上，继续把本地代码智能从“一次性 LSP 请求”推进到“会话级、受控复用”的实现，同时把资源边界收紧，避免为了代码智能把 CLI 常驻负担越堆越高。
