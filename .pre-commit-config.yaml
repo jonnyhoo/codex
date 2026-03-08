@@ -1,0 +1,28 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt-codex-rs
+        name: cargo fmt (codex-rs workspace)
+        entry: powershell
+        args:
+          - -NoProfile
+          - -ExecutionPolicy
+          - Bypass
+          - -File
+          - .pre-commit/cargo-fmt.ps1
+        language: system
+        pass_filenames: false
+        files: ^codex-rs/.*\.rs$
+
+      - id: cargo-clippy-codex-rs
+        name: cargo clippy (codex-core lib)
+        entry: powershell
+        args:
+          - -NoProfile
+          - -ExecutionPolicy
+          - Bypass
+          - -File
+          - .pre-commit/cargo-clippy.ps1
+        language: system
+        pass_filenames: false
+        files: ^codex-rs/core/.*\.rs$
