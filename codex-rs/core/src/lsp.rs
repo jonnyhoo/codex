@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::BufRead;
@@ -40,6 +41,9 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 60 * 1000;
 const DEFAULT_MAX_PERSISTENT_SESSIONS: usize = 2;
 const DEFAULT_MAX_OPEN_DOCUMENTS: usize = 8;
 const SESSION_REAPER_INTERVAL_MS: u64 = 15 * 1000;
+const WORK_DONE_PROGRESS_QUIET_PERIOD_MS: u64 = 250;
+const EMPTY_RESULT_RETRY_MAX_WAIT_MS: u64 = 8_000;
+const MIN_EMPTY_RESULT_RETRY_TIMEOUT_MS: u64 = 250;
 const URI_KEYS: [&str; 4] = ["uri", "targetUri", "oldUri", "newUri"];
 const DEFAULT_CODE_ACTION_KINDS: [&str; 7] = [
     "quickfix",
@@ -489,6 +493,19 @@ struct LspTransport {
     text_document_sync: TextDocumentSyncSupport,
     diagnostics_by_uri: HashMap<String, Value>,
     open_documents: HashMap<String, OpenDocumentState>,
+    work_done_progress: WorkDoneProgressState,
+}
+
+#[derive(Debug, Default)]
+struct WorkDoneProgressState {
+    active_tokens: HashSet<String>,
+    last_activity_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+struct ProgressWaitOutcome {
+    observed_progress: bool,
+    waited: Duration,
 }
 
 impl Drop for LspTransport {
@@ -548,6 +565,7 @@ impl LspTransport {
             text_document_sync: TextDocumentSyncSupport::default(),
             diagnostics_by_uri: HashMap::new(),
             open_documents: HashMap::new(),
+            work_done_progress: WorkDoneProgressState::default(),
         })
     }
 
@@ -813,6 +831,57 @@ impl LspTransport {
             .unwrap_or_else(|| Value::Array(Vec::new())))
     }
 
+    fn wait_for_progress_quiet(
+        &mut self,
+        max_wait: Duration,
+        quiet_period: Duration,
+    ) -> Result<ProgressWaitOutcome> {
+        let started_at = Instant::now();
+        let mut observed_progress = !self.work_done_progress.active_tokens.is_empty();
+
+        loop {
+            if observed_progress
+                && self
+                    .work_done_progress
+                    .last_activity_at
+                    .is_none_or(|last_activity_at| last_activity_at.elapsed() >= quiet_period)
+            {
+                return Ok(ProgressWaitOutcome {
+                    observed_progress,
+                    waited: started_at.elapsed(),
+                });
+            }
+
+            let elapsed = started_at.elapsed();
+            if elapsed >= max_wait {
+                return Ok(ProgressWaitOutcome {
+                    observed_progress,
+                    waited: elapsed,
+                });
+            }
+
+            let remaining = max_wait.saturating_sub(elapsed);
+            let wait_timeout = remaining.min(quiet_period);
+            match self.recv_event(wait_timeout)? {
+                Some(ReaderEvent::Message(message)) => {
+                    if self.handle_message(message)? {
+                        observed_progress = true;
+                    }
+                }
+                Some(ReaderEvent::Closed) => return Err(self.closed_before_responding_error()),
+                Some(ReaderEvent::Error(message)) => bail!(message),
+                None => {
+                    if observed_progress {
+                        return Ok(ProgressWaitOutcome {
+                            observed_progress,
+                            waited: started_at.elapsed(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
         self.write_message(&json!({
             "jsonrpc": "2.0",
@@ -901,6 +970,13 @@ impl LspTransport {
         if message.get("method").is_some() && message.get("id").is_some() {
             self.respond_to_server_request(&message)?;
             return Ok(false);
+        }
+
+        if let Some(method) = message.get("method").and_then(Value::as_str)
+            && method == "$/progress"
+        {
+            record_work_done_progress(&mut self.work_done_progress, message.get("params"));
+            return Ok(true);
         }
 
         if let Some(method) = message.get("method").and_then(Value::as_str)
@@ -1405,60 +1481,31 @@ fn invoke_transient(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_transport_request(
+fn dispatch_transport_request(
     transport: &mut LspTransport,
     request: &LspToolRequest,
     effective_action: &LspAction,
-    provider: &LspProvider,
-    server_config: &LspServerConfig,
-    workspace_root: &Path,
-    resolved_path: Option<&Path>,
-    limit: usize,
-    max_open_documents: usize,
+    opened_document_uri: Option<&str>,
     timeout: Duration,
-) -> Result<String> {
-    let mut opened_document_uri: Option<String> = None;
-    let mut opened_document_path: Option<PathBuf> = None;
-    if *effective_action != LspAction::WorkspaceSymbols {
-        let path = resolved_path
-            .ok_or_else(|| anyhow!("path is required for {}", effective_action.as_str()))?;
-        if !path.is_file() {
-            bail!(
-                "path must point to a file for {}",
-                effective_action.as_str()
-            );
-        }
-        let language_id = provider.language_id_for_path(path);
-        let uri = transport.sync_document(path, &language_id)?;
-        transport.evict_open_documents(max_open_documents.max(1))?;
-        opened_document_uri = Some(uri);
-        opened_document_path = Some(path.to_path_buf());
-    }
-
-    let raw_result = match effective_action {
+) -> Result<Value> {
+    match effective_action {
         LspAction::Auto => unreachable!("auto action resolves before request dispatch"),
         LspAction::Providers => unreachable!("providers action returns before request dispatch"),
         LspAction::Diagnostics => transport.collect_diagnostics(
-            opened_document_uri
-                .as_deref()
-                .ok_or_else(|| anyhow!("diagnostics requires an opened document"))?,
+            opened_document_uri.ok_or_else(|| anyhow!("diagnostics requires an opened document"))?,
             timeout,
             Duration::from_millis(DIAGNOSTICS_QUIET_PERIOD_MS),
-        )?,
+        ),
         LspAction::Definition => transport.send_request(
             "textDocument/definition",
-            position_params(
-                opened_document_uri.as_deref(),
-                request.line,
-                request.column,
-            )?,
+            position_params(opened_document_uri, request.line, request.column)?,
             timeout,
-        )?,
+        ),
         LspAction::References => transport.send_request(
             "textDocument/references",
             json!({
                 "textDocument": {
-                    "uri": opened_document_uri.as_deref().ok_or_else(|| anyhow!("references requires an opened document"))?
+                    "uri": opened_document_uri.ok_or_else(|| anyhow!("references requires an opened document"))?
                 },
                 "position": position_value(request.line, request.column)?,
                 "context": {
@@ -1466,43 +1513,39 @@ fn run_transport_request(
                 }
             }),
             timeout,
-        )?,
+        ),
         LspAction::Hover => transport.send_request(
             "textDocument/hover",
-            position_params(
-                opened_document_uri.as_deref(),
-                request.line,
-                request.column,
-            )?,
+            position_params(opened_document_uri, request.line, request.column)?,
             timeout,
-        )?,
+        ),
         LspAction::DocumentSymbols => transport.send_request(
             "textDocument/documentSymbol",
             json!({
                 "textDocument": {
-                    "uri": opened_document_uri.as_deref().ok_or_else(|| anyhow!("document_symbols requires an opened document"))?
+                    "uri": opened_document_uri.ok_or_else(|| anyhow!("document_symbols requires an opened document"))?
                 }
             }),
             timeout,
-        )?,
+        ),
         LspAction::WorkspaceSymbols => transport.send_request(
             "workspace/symbol",
             json!({
                 "query": request.query.clone().unwrap_or_default()
             }),
             timeout,
-        )?,
+        ),
         LspAction::Rename => transport.send_request(
             "textDocument/rename",
             json!({
                 "textDocument": {
-                    "uri": opened_document_uri.as_deref().ok_or_else(|| anyhow!("rename requires an opened document"))?
+                    "uri": opened_document_uri.ok_or_else(|| anyhow!("rename requires an opened document"))?
                 },
                 "position": position_value(request.line, request.column)?,
                 "newName": request.new_name.clone().ok_or_else(|| anyhow!("rename requires new_name"))?
             }),
             timeout,
-        )?,
+        ),
         LspAction::Completion => {
             let context = if let Some(trigger_character) = request.trigger_character.clone() {
                 json!({
@@ -1518,13 +1561,13 @@ fn run_transport_request(
                 "textDocument/completion",
                 json!({
                     "textDocument": {
-                        "uri": opened_document_uri.as_deref().ok_or_else(|| anyhow!("completion requires an opened document"))?
+                        "uri": opened_document_uri.ok_or_else(|| anyhow!("completion requires an opened document"))?
                     },
                     "position": position_value(request.line, request.column)?,
                     "context": context,
                 }),
                 timeout,
-            )?
+            )
         }
         LspAction::SignatureHelp => {
             let context = if let Some(trigger_character) = request.trigger_character.clone() {
@@ -1541,18 +1584,17 @@ fn run_transport_request(
                 "textDocument/signatureHelp",
                 json!({
                     "textDocument": {
-                        "uri": opened_document_uri.as_deref().ok_or_else(|| anyhow!("signature_help requires an opened document"))?
+                        "uri": opened_document_uri.ok_or_else(|| anyhow!("signature_help requires an opened document"))?
                     },
                     "position": position_value(request.line, request.column)?,
                     "context": context,
                 }),
                 timeout,
-            )?
+            )
         }
         LspAction::CodeActions => {
-            let document_uri = opened_document_uri
-                .as_deref()
-                .ok_or_else(|| anyhow!("code_actions requires an opened document"))?;
+            let document_uri =
+                opened_document_uri.ok_or_else(|| anyhow!("code_actions requires an opened document"))?;
             let diagnostics = transport.collect_diagnostics(
                 document_uri,
                 Duration::from_millis(timeout.as_millis().min(2_000) as u64),
@@ -1586,9 +1628,114 @@ fn run_transport_request(
                     "context": context,
                 }),
                 timeout,
-            )?
+            )
         }
-    };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_transport_request(
+    transport: &mut LspTransport,
+    request: &LspToolRequest,
+    effective_action: &LspAction,
+    provider: &LspProvider,
+    server_config: &LspServerConfig,
+    workspace_root: &Path,
+    resolved_path: Option<&Path>,
+    limit: usize,
+    max_open_documents: usize,
+    timeout: Duration,
+) -> Result<String> {
+    let mut opened_document_uri: Option<String> = None;
+    let mut opened_document_path: Option<PathBuf> = None;
+    if *effective_action != LspAction::WorkspaceSymbols {
+        let path = resolved_path
+            .ok_or_else(|| anyhow!("path is required for {}", effective_action.as_str()))?;
+        if !path.is_file() {
+            bail!(
+                "path must point to a file for {}",
+                effective_action.as_str()
+            );
+        }
+        let language_id = provider.language_id_for_path(path);
+        let uri = transport.sync_document(path, &language_id)?;
+        transport.evict_open_documents(max_open_documents.max(1))?;
+        opened_document_uri = Some(uri);
+        opened_document_path = Some(path.to_path_buf());
+    }
+
+    let mut raw_result = dispatch_transport_request(
+        transport,
+        request,
+        effective_action,
+        opened_document_uri.as_deref(),
+        timeout,
+    )?;
+    if should_retry_empty_result(provider, effective_action, &raw_result) {
+        let retry_budget = empty_result_retry_budget(timeout);
+        if retry_budget > Duration::ZERO {
+            let progress_wait = transport.wait_for_progress_quiet(
+                retry_budget,
+                Duration::from_millis(WORK_DONE_PROGRESS_QUIET_PERIOD_MS),
+            )?;
+            if progress_wait.observed_progress {
+                let retry_timeout = retry_budget
+                    .saturating_sub(progress_wait.waited)
+                    .max(Duration::from_millis(MIN_EMPTY_RESULT_RETRY_TIMEOUT_MS));
+                raw_result = dispatch_transport_request(
+                    transport,
+                    request,
+                    effective_action,
+                    opened_document_uri.as_deref(),
+                    retry_timeout,
+                )?;
+            }
+        }
+    }
+    if *effective_action == LspAction::WorkspaceSymbols
+        && is_empty_symbol_result(&raw_result)
+        && let Some(path) = resolved_path
+    {
+        let language_id = provider.language_id_for_path(path);
+        let uri = transport.sync_document(path, &language_id)?;
+        transport.evict_open_documents(max_open_documents.max(1))?;
+        let document_symbols = dispatch_transport_request(
+            transport,
+            request,
+            &LspAction::DocumentSymbols,
+            Some(uri.as_str()),
+            timeout,
+        )?;
+        let fallback_result = fallback_workspace_symbols_from_document_symbols(
+            &document_symbols,
+            path,
+            request.query.as_deref(),
+            limit,
+        )?;
+        if !is_empty_symbol_result(&fallback_result) {
+            raw_result = fallback_result;
+            opened_document_path = Some(path.to_path_buf());
+        }
+    }
+    if *effective_action == LspAction::Hover
+        && raw_result.is_null()
+        && let Some(document_symbols) = opened_document_uri
+            .as_deref()
+            .map(|uri| {
+                dispatch_transport_request(
+                    transport,
+                    request,
+                    &LspAction::DocumentSymbols,
+                    Some(uri),
+                    timeout,
+                )
+            })
+            .transpose()?
+        && let Some(fallback_result) =
+            hover_fallback_from_document_symbols(&document_symbols, request.line, request.column)
+    {
+        raw_result = fallback_result;
+    }
 
     render_lsp_result(
         request,
@@ -1700,7 +1847,10 @@ fn text_document_sync_support(initialize_result: &Value) -> TextDocumentSyncSupp
 }
 
 fn load_workspace_settings(workspace_root: &Path) -> Value {
-    let settings_path = workspace_root.join(".vscode").join("settings.json");
+    let Some((settings_path, workspace_folder)) = find_workspace_settings_path(workspace_root)
+    else {
+        return Value::Object(serde_json::Map::new());
+    };
     let content = match fs::read_to_string(&settings_path) {
         Ok(content) => content,
         Err(err) => {
@@ -1715,7 +1865,9 @@ fn load_workspace_settings(workspace_root: &Path) -> Value {
     };
 
     match parse_jsonc_value(&content) {
-        Ok(parsed) => normalize_workspace_settings(&parsed),
+        Ok(parsed) => {
+            normalize_workspace_settings(&expand_workspace_variables(&parsed, &workspace_folder))
+        }
         Err(err) => {
             warn!(
                 "failed to parse VS Code workspace settings {}: {err}",
@@ -1724,6 +1876,76 @@ fn load_workspace_settings(workspace_root: &Path) -> Value {
             Value::Object(serde_json::Map::new())
         }
     }
+}
+
+fn find_workspace_settings_path(workspace_root: &Path) -> Option<(PathBuf, PathBuf)> {
+    for ancestor in workspace_root.ancestors() {
+        let settings_path = ancestor.join(".vscode").join("settings.json");
+        if settings_path.is_file() {
+            return Some((settings_path, ancestor.to_path_buf()));
+        }
+    }
+    None
+}
+
+fn expand_workspace_variables(value: &Value, workspace_folder: &Path) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        expand_workspace_variables(value, workspace_folder),
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|value| expand_workspace_variables(value, workspace_folder))
+                .collect(),
+        ),
+        Value::String(text) => {
+            Value::String(expand_workspace_variables_in_string(text, workspace_folder))
+        }
+        _ => value.clone(),
+    }
+}
+
+fn expand_workspace_variables_in_string(value: &str, workspace_folder: &Path) -> String {
+    for variable in ["${workspaceFolder}", "${workspaceRoot}"] {
+        if let Some(suffix) = value.strip_prefix(variable) {
+            let trimmed = suffix.trim_start_matches(['/', '\\']);
+            if trimmed.len() != suffix.len() {
+                let normalized_suffix: String = trimmed
+                    .chars()
+                    .map(|ch| {
+                        if matches!(ch, '/' | '\\') {
+                            std::path::MAIN_SEPARATOR
+                        } else {
+                            ch
+                        }
+                    })
+                    .collect();
+                return workspace_folder
+                    .join(normalized_suffix)
+                    .display()
+                    .to_string();
+            }
+        }
+    }
+
+    let workspace_folder_string = workspace_folder.display().to_string();
+    let workspace_folder_basename = workspace_folder
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+
+    value
+        .replace("${workspaceFolder}", &workspace_folder_string)
+        .replace("${workspaceRoot}", &workspace_folder_string)
+        .replace("${workspaceFolderBasename}", workspace_folder_basename)
 }
 
 fn parse_jsonc_value(content: &str) -> Result<Value> {
@@ -1958,6 +2180,242 @@ fn default_timeout_ms() -> u64 {
 
 fn normalize_extension(value: &str) -> String {
     value.trim().trim_start_matches('.').to_ascii_lowercase()
+}
+
+fn progress_token_key(token: Option<&Value>) -> Option<String> {
+    match token {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn record_work_done_progress(state: &mut WorkDoneProgressState, params: Option<&Value>) {
+    let Some(params) = params else {
+        return;
+    };
+    let Some(token) = progress_token_key(params.get("token")) else {
+        return;
+    };
+    let Some(kind) = params
+        .get("value")
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+
+    state.last_activity_at = Some(Instant::now());
+    match kind {
+        "begin" | "report" => {
+            state.active_tokens.insert(token);
+        }
+        "end" => {
+            state.active_tokens.remove(&token);
+        }
+        _ => {}
+    }
+}
+
+fn should_retry_empty_result(provider: &LspProvider, action: &LspAction, result: &Value) -> bool {
+    if provider.id != "rust" {
+        return false;
+    }
+
+    match action {
+        LspAction::Hover => result.is_null(),
+        LspAction::WorkspaceSymbols => {
+            result.is_null() || result.as_array().is_some_and(Vec::is_empty)
+        }
+        _ => false,
+    }
+}
+
+fn empty_result_retry_budget(timeout: Duration) -> Duration {
+    (timeout / 2).min(Duration::from_millis(EMPTY_RESULT_RETRY_MAX_WAIT_MS))
+}
+
+fn is_empty_symbol_result(result: &Value) -> bool {
+    result.is_null() || result.as_array().is_some_and(Vec::is_empty)
+}
+
+fn fallback_workspace_symbols_from_document_symbols(
+    document_symbols: &Value,
+    path: &Path,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Value> {
+    let Some(items) = document_symbols.as_array() else {
+        return Ok(Value::Array(Vec::new()));
+    };
+    let uri = path_to_file_url(path)?;
+    let normalized_query = query.unwrap_or_default().trim().to_ascii_lowercase();
+    let mut matches = Vec::new();
+    let mut next_index = 0usize;
+    collect_matching_document_symbols(
+        items,
+        &uri,
+        &normalized_query,
+        &mut next_index,
+        &mut matches,
+    );
+    matches.sort_by_key(|(score, index, _)| (*score, *index));
+    Ok(Value::Array(
+        matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, value)| value)
+            .collect(),
+    ))
+}
+
+fn collect_matching_document_symbols(
+    items: &[Value],
+    uri: &str,
+    query: &str,
+    next_index: &mut usize,
+    matches: &mut Vec<(u8, usize, Value)>,
+) {
+    for item in items {
+        if let Some(score) = document_symbol_query_score(item, query) {
+            matches.push((
+                score,
+                *next_index,
+                json!({
+                    "name": item.get("name").cloned().unwrap_or(Value::Null),
+                    "kind": item.get("kind").cloned().unwrap_or(Value::Null),
+                    "location": {
+                        "uri": uri,
+                        "range": item
+                            .get("selectionRange")
+                            .cloned()
+                            .or_else(|| item.get("range").cloned())
+                            .unwrap_or(Value::Null)
+                    }
+                }),
+            ));
+            *next_index += 1;
+        }
+
+        if let Some(children) = item.get("children").and_then(Value::as_array) {
+            collect_matching_document_symbols(children, uri, query, next_index, matches);
+        }
+    }
+}
+
+fn document_symbol_query_score(item: &Value, query: &str) -> Option<u8> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if name == query {
+        return Some(0);
+    }
+    if name.starts_with(query) {
+        return Some(1);
+    }
+    if name.contains(query) {
+        return Some(2);
+    }
+
+    item.get("detail")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .filter(|detail| detail.contains(query))
+        .map(|_| 3)
+}
+
+fn hover_fallback_from_document_symbols(
+    document_symbols: &Value,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> Option<Value> {
+    let line = i64::from(line?.checked_sub(1)?);
+    let column = i64::from(column?.checked_sub(1)?);
+    let items = document_symbols.as_array()?;
+    let symbol = find_deepest_document_symbol_at_position(items, line, column)?;
+    let name = symbol.get("name").and_then(Value::as_str)?;
+    let detail = symbol
+        .get("detail")
+        .and_then(Value::as_str)
+        .filter(|detail| !detail.is_empty());
+    let value = if let Some(detail) = detail {
+        format!("```text\n{name}\n{detail}\n```")
+    } else {
+        format!("```text\n{name}\n```")
+    };
+
+    Some(json!({
+        "contents": {
+            "kind": "markdown",
+            "value": value
+        },
+        "range": symbol
+            .get("selectionRange")
+            .cloned()
+            .or_else(|| symbol.get("range").cloned())
+            .unwrap_or(Value::Null)
+    }))
+}
+
+fn find_deepest_document_symbol_at_position(
+    items: &[Value],
+    line: i64,
+    column: i64,
+) -> Option<&Value> {
+    for item in items {
+        if !document_symbol_contains_position(item, line, column) {
+            continue;
+        }
+
+        if let Some(children) = item.get("children").and_then(Value::as_array)
+            && let Some(child) = find_deepest_document_symbol_at_position(children, line, column)
+        {
+            return Some(child);
+        }
+
+        return Some(item);
+    }
+    None
+}
+
+fn document_symbol_contains_position(item: &Value, line: i64, column: i64) -> bool {
+    let start_line = item
+        .get("range")
+        .and_then(|range| range.get("start"))
+        .and_then(|start| start.get("line"))
+        .and_then(Value::as_i64);
+    let start_character = item
+        .get("range")
+        .and_then(|range| range.get("start"))
+        .and_then(|start| start.get("character"))
+        .and_then(Value::as_i64);
+    let end_line = item
+        .get("range")
+        .and_then(|range| range.get("end"))
+        .and_then(|end| end.get("line"))
+        .and_then(Value::as_i64);
+    let end_character = item
+        .get("range")
+        .and_then(|range| range.get("end"))
+        .and_then(|end| end.get("character"))
+        .and_then(Value::as_i64);
+
+    let (Some(start_line), Some(start_character), Some(end_line), Some(end_character)) =
+        (start_line, start_character, end_line, end_character)
+    else {
+        return false;
+    };
+
+    let starts_before_or_at =
+        line > start_line || (line == start_line && column >= start_character);
+    let ends_after_or_at = line < end_line || (line == end_line && column <= end_character);
+    starts_before_or_at && ends_after_or_at
 }
 
 fn infer_auto_action(request: &LspToolRequest, resolved_path: Option<&Path>) -> LspAction {
@@ -2693,15 +3151,39 @@ fn truncate_result(action: &LspAction, value: &mut Value, limit: usize) {
 
 #[cfg(test)]
 mod tests {
+    use super::LspAction;
+    use super::fallback_workspace_symbols_from_document_symbols;
     use super::find_workspace_root;
+    use super::hover_fallback_from_document_symbols;
     use super::load_provider_registry;
+    use super::load_workspace_settings;
     use super::normalize_value_for_output;
     use super::parse_jsonc_value;
+    use super::should_retry_empty_result;
     use super::workspace_configuration_response;
+    use serde_json::Value;
     use serde_json::json;
     use std::path::Path;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn symbol_range(
+        start_line: i64,
+        start_character: i64,
+        end_line: i64,
+        end_character: i64,
+    ) -> Value {
+        json!({
+            "start": {
+                "line": start_line,
+                "character": start_character
+            },
+            "end": {
+                "line": end_line,
+                "character": end_character
+            }
+        })
+    }
 
     #[test]
     fn normalize_value_for_output_converts_file_uris_and_positions() {
@@ -2833,6 +3315,180 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn load_workspace_settings_uses_ancestor_vscode_dir_and_expands_variables() {
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let nested = workspace.join("crates").join("demo").join("src");
+        let vscode_dir = workspace.join(".vscode");
+        std::fs::create_dir_all(&nested).expect("create nested workspace");
+        std::fs::create_dir_all(&vscode_dir).expect("create .vscode dir");
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{
+                "rust-analyzer.linkedProjects": [
+                    "${workspaceFolder}/Cargo.toml",
+                    "${workspaceRoot}\\crates\\demo\\Cargo.toml"
+                ],
+                "rust-analyzer.cargo.targetDir": "${workspaceFolderBasename}"
+            }"#,
+        )
+        .expect("write settings.json");
+
+        let settings = load_workspace_settings(&nested);
+        assert_eq!(
+            settings,
+            json!({
+                "rust-analyzer": {
+                    "linkedProjects": [
+                        workspace.join("Cargo.toml").display().to_string(),
+                        workspace
+                            .join("crates")
+                            .join("demo")
+                            .join("Cargo.toml")
+                            .display()
+                            .to_string()
+                    ],
+                    "cargo": {
+                        "targetDir": "workspace"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn should_retry_empty_result_only_for_rust_hover_and_workspace_symbols() {
+        let tempdir = tempdir().expect("create tempdir");
+        let providers = load_provider_registry(tempdir.path(), tempdir.path());
+        let rust = providers
+            .iter()
+            .find(|provider| provider.id == "rust")
+            .expect("rust provider");
+        let python = providers
+            .iter()
+            .find(|provider| provider.id == "python")
+            .expect("python provider");
+
+        assert!(should_retry_empty_result(
+            rust,
+            &LspAction::Hover,
+            &Value::Null
+        ));
+        assert!(should_retry_empty_result(
+            rust,
+            &LspAction::WorkspaceSymbols,
+            &json!([])
+        ));
+        assert!(!should_retry_empty_result(
+            rust,
+            &LspAction::WorkspaceSymbols,
+            &json!([{ "name": "helper" }])
+        ));
+        assert!(!should_retry_empty_result(
+            rust,
+            &LspAction::DocumentSymbols,
+            &Value::Null
+        ));
+        assert!(!should_retry_empty_result(
+            python,
+            &LspAction::Hover,
+            &Value::Null
+        ));
+    }
+
+    #[test]
+    fn workspace_symbol_fallback_ranks_exact_prefix_contains_then_detail() {
+        let tempdir = tempdir().expect("create tempdir");
+        let file_path = tempdir.path().join("main.rs");
+        std::fs::write(&file_path, "// fallback symbol source\n").expect("write source file");
+        let document_symbols = json!([
+            {
+                "name": "alpha_target",
+                "kind": 12,
+                "range": symbol_range(0, 0, 0, 12),
+                "selectionRange": symbol_range(0, 0, 0, 12)
+            },
+            {
+                "name": "container",
+                "kind": 5,
+                "range": symbol_range(1, 0, 5, 0),
+                "selectionRange": symbol_range(1, 0, 1, 9),
+                "children": [
+                    {
+                        "name": "target",
+                        "kind": 12,
+                        "range": symbol_range(2, 0, 2, 6),
+                        "selectionRange": symbol_range(2, 0, 2, 6)
+                    }
+                ]
+            },
+            {
+                "name": "TargetWidget",
+                "kind": 12,
+                "range": symbol_range(6, 0, 6, 12),
+                "selectionRange": symbol_range(6, 0, 6, 12)
+            },
+            {
+                "name": "misc",
+                "kind": 12,
+                "detail": "returns target metadata",
+                "range": symbol_range(7, 0, 7, 4),
+                "selectionRange": symbol_range(7, 0, 7, 4)
+            }
+        ]);
+
+        let result = fallback_workspace_symbols_from_document_symbols(
+            &document_symbols,
+            &file_path,
+            Some("target"),
+            10,
+        )
+        .expect("build workspace symbol fallback");
+        let names: Vec<_> = result
+            .as_array()
+            .expect("result array")
+            .iter()
+            .filter_map(|item| item.get("name").and_then(Value::as_str))
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["target", "TargetWidget", "alpha_target", "misc"]
+        );
+    }
+
+    #[test]
+    fn hover_fallback_prefers_deepest_matching_document_symbol() {
+        let document_symbols = json!([
+            {
+                "name": "outer",
+                "kind": 2,
+                "detail": "mod outer",
+                "range": symbol_range(0, 0, 8, 0),
+                "selectionRange": symbol_range(0, 0, 0, 5),
+                "children": [
+                    {
+                        "name": "inner",
+                        "kind": 12,
+                        "detail": "fn inner()",
+                        "range": symbol_range(2, 0, 4, 1),
+                        "selectionRange": symbol_range(2, 3, 2, 8)
+                    }
+                ]
+            }
+        ]);
+
+        let hover = hover_fallback_from_document_symbols(&document_symbols, Some(3), Some(4))
+            .expect("hover fallback");
+        assert_eq!(hover["contents"]["kind"], json!("markdown"));
+        assert_eq!(
+            hover["contents"]["value"],
+            json!("```text\ninner\nfn inner()\n```")
+        );
+        assert_eq!(hover["range"], symbol_range(2, 3, 2, 8));
     }
 
     #[test]
