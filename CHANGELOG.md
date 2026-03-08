@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.0
+
+这个版本在 `v0.1.0` 的基础上，继续把本地代码智能从“一次性 LSP 请求”推进到“会话级、受控复用”的实现，同时把资源边界收紧，避免为了代码智能把 CLI 常驻负担越堆越高。
+
+### Persistent LSP Sessions
+
+- `lsp` tool 改为支持 session-scoped 的持久 LSP session
+- 按 `(workspace_root, provider)` 复用 language server，而不是每次请求都完整重启
+- 增加空闲回收、容量上限、坏 session 丢弃和 session shutdown 清理
+- 当持久 session 池达到上限且都在忙时，自动退回一次性 transient session，避免并发尖峰把常驻 server 越堆越多
+
+### Workspace Bridging
+
+- 增加 `didOpen` / `didChange` / `didClose` 文档同步
+- `workspace/workspaceFolders` 改为返回真实 workspace
+- `workspace/configuration` 改为返回真实配置，而不是一组 `null`
+- 支持读取 `.vscode/settings.json`，并兼容 JSONC 注释、尾逗号和 dotted key 归一化
+
+### Validation
+
+- 新增和补强 LSP 配置映射相关测试
+- `codex-core` 已通过 `fmt`、`clippy -D warnings`、`lsp::tests`
+- `codex-cli` 依赖链已完成常规构建验证
+
 ## v0.1.0
 
 这个版本是基于 `openai/codex` 的 fork 首个正式发布版本，重点不在界面变化，而在本地代码智能、文件编辑能力、Windows 运行稳定性，以及 fork 自身的发布链路。
