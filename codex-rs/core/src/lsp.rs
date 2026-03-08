@@ -21,6 +21,9 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvTimeoutError;
@@ -33,6 +36,10 @@ use url::Url;
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_LIMIT: usize = 50;
 const DIAGNOSTICS_QUIET_PERIOD_MS: u64 = 300;
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 60 * 1000;
+const DEFAULT_MAX_PERSISTENT_SESSIONS: usize = 2;
+const DEFAULT_MAX_OPEN_DOCUMENTS: usize = 8;
+const SESSION_REAPER_INTERVAL_MS: u64 = 15 * 1000;
 const URI_KEYS: [&str; 4] = ["uri", "targetUri", "oldUri", "newUri"];
 const DEFAULT_CODE_ACTION_KINDS: [&str; 7] = [
     "quickfix",
@@ -46,6 +53,10 @@ const DEFAULT_CODE_ACTION_KINDS: [&str; 7] = [
 const WORKSPACE_PROVIDER_DIR_RELATIVE: [&str; 2] = [".codex", "lsp-providers"];
 const USER_PROVIDER_DIR_NAME: &str = "lsp-providers";
 const PROVIDER_DIRS_ENV_VAR: &str = "CODEX_LSP_PROVIDER_DIRS";
+const LSP_DISABLE_PERSISTENT_ENV_VAR: &str = "CODEX_LSP_DISABLE_PERSISTENT";
+const LSP_IDLE_TIMEOUT_ENV_VAR: &str = "CODEX_LSP_IDLE_TIMEOUT_MS";
+const LSP_MAX_SESSIONS_ENV_VAR: &str = "CODEX_LSP_MAX_SESSIONS";
+const LSP_MAX_OPEN_DOCUMENTS_ENV_VAR: &str = "CODEX_LSP_MAX_OPEN_DOCUMENTS";
 const LSP_STDERR_TAIL_LIMIT: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
@@ -136,6 +147,7 @@ pub struct LspProviderStatus {
 }
 
 impl LspProvider {
+    #[allow(clippy::too_many_arguments)]
     fn builtin(
         id: &str,
         aliases: &[&str],
@@ -291,15 +303,172 @@ struct LspProviderPlugin {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum LspProviderPluginFile {
     Single(LspProviderPlugin),
     Many { providers: Vec<LspProviderPlugin> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 struct LspServerConfig {
     command: String,
     args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextDocumentSyncSupport {
+    open_close: bool,
+    supports_did_change: bool,
+}
+
+impl Default for TextDocumentSyncSupport {
+    fn default() -> Self {
+        Self {
+            open_close: true,
+            supports_did_change: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OpenDocumentState {
+    language_id: String,
+    text: String,
+    version: i32,
+    last_accessed_at: Instant,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct LspSessionKey {
+    provider_id: String,
+    workspace_root: PathBuf,
+}
+
+struct LspManagedSession {
+    session: Arc<Mutex<LspServerSession>>,
+    last_used_at: Instant,
+    active_requests: usize,
+}
+
+#[derive(Default)]
+struct LspSessionManagerInner {
+    sessions: HashMap<LspSessionKey, LspManagedSession>,
+}
+
+#[derive(Debug, Clone)]
+struct LspSessionManagerConfig {
+    persistent_enabled: bool,
+    idle_timeout: Duration,
+    max_sessions: usize,
+    max_open_documents: usize,
+}
+
+impl Default for LspSessionManagerConfig {
+    fn default() -> Self {
+        Self {
+            persistent_enabled: !env_var_truthy(LSP_DISABLE_PERSISTENT_ENV_VAR),
+            idle_timeout: Duration::from_millis(
+                env::var(LSP_IDLE_TIMEOUT_ENV_VAR)
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            ),
+            max_sessions: env::var(LSP_MAX_SESSIONS_ENV_VAR)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_PERSISTENT_SESSIONS),
+            max_open_documents: env::var(LSP_MAX_OPEN_DOCUMENTS_ENV_VAR)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_OPEN_DOCUMENTS),
+        }
+    }
+}
+
+pub(crate) struct LspSessionManager {
+    config: LspSessionManagerConfig,
+    inner: Arc<Mutex<LspSessionManagerInner>>,
+    reaper_started: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Default for LspSessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LspSessionManager {
+    pub(crate) fn new() -> Self {
+        Self {
+            config: LspSessionManagerConfig::default(),
+            inner: Arc::new(Mutex::new(LspSessionManagerInner::default())),
+            reaper_started: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn persistent_enabled(&self) -> bool {
+        self.config.persistent_enabled
+    }
+
+    fn ensure_idle_reaper(&self) {
+        if !self.config.persistent_enabled {
+            return;
+        }
+        if self
+            .reaper_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        self.spawn_idle_reaper();
+    }
+
+    fn spawn_idle_reaper(&self) {
+        let inner = Arc::downgrade(&self.inner);
+        let shutdown = Arc::clone(&self.shutdown);
+        let idle_timeout = self.config.idle_timeout;
+        thread::spawn(move || {
+            loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(SESSION_REAPER_INTERVAL_MS));
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let Some(inner) = Weak::upgrade(&inner) else {
+                    break;
+                };
+                let sessions_to_shutdown = if let Ok(mut inner) = inner.lock() {
+                    LspSessionManager::reap_idle_sessions(&mut inner, Instant::now(), idle_timeout)
+                } else {
+                    Vec::new()
+                };
+                LspSessionManager::shutdown_session_list(sessions_to_shutdown);
+            }
+        });
+    }
+}
+
+impl Drop for LspSessionManager {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+struct LspServerSession {
+    provider_id: String,
+    workspace_root: PathBuf,
+    server_config: LspServerConfig,
+    workspace_settings: Value,
+    transport: LspTransport,
 }
 
 #[derive(Debug)]
@@ -314,8 +483,12 @@ struct LspTransport {
     stdin: ChildStdin,
     events: Receiver<ReaderEvent>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
+    workspace_root: PathBuf,
+    workspace_settings: Value,
     next_id: i64,
+    text_document_sync: TextDocumentSyncSupport,
     diagnostics_by_uri: HashMap<String, Value>,
+    open_documents: HashMap<String, OpenDocumentState>,
 }
 
 impl Drop for LspTransport {
@@ -326,7 +499,11 @@ impl Drop for LspTransport {
 }
 
 impl LspTransport {
-    fn spawn(config: &LspServerConfig, workspace_root: &Path) -> Result<Self> {
+    fn spawn(
+        config: &LspServerConfig,
+        workspace_root: &Path,
+        workspace_settings: Value,
+    ) -> Result<Self> {
         let command = resolve_command_path(&config.command)
             .with_context(|| format!("language server command not found: {}", config.command))?;
 
@@ -365,16 +542,22 @@ impl LspTransport {
             stdin,
             events,
             stderr_tail,
+            workspace_root: workspace_root.to_path_buf(),
+            workspace_settings,
             next_id: 1,
+            text_document_sync: TextDocumentSyncSupport::default(),
             diagnostics_by_uri: HashMap::new(),
+            open_documents: HashMap::new(),
         })
     }
 
     fn initialize(&mut self, workspace_root: &Path, timeout: Duration) -> Result<()> {
         let root_uri = path_to_file_url(workspace_root)?;
+        let workspace_folders = workspace_folders_value(workspace_root)?;
         let params = json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
+            "workspaceFolders": workspace_folders,
             "capabilities": {
                 "workspace": {
                     "applyEdit": false,
@@ -432,26 +615,161 @@ impl LspTransport {
             }
         });
 
-        let _ = self.send_request("initialize", params, timeout)?;
+        let initialize_result = self.send_request("initialize", params, timeout)?;
+        self.text_document_sync = text_document_sync_support(&initialize_result);
         self.send_notification("initialized", json!({}))?;
         Ok(())
     }
 
-    fn open_document(&mut self, path: &Path, language_id: &str) -> Result<String> {
+    fn sync_document(&mut self, path: &Path, language_id: &str) -> Result<String> {
         let uri = path_to_file_url(path)?;
         let text = String::from_utf8_lossy(&fs::read(path)?).into_owned();
-        self.send_notification(
-            "textDocument/didOpen",
-            json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": text
+        let now = Instant::now();
+        let existing = self.open_documents.get(&uri).cloned();
+
+        match existing {
+            Some(document) if document.language_id == language_id && document.text == text => {
+                if let Some(current) = self.open_documents.get_mut(&uri) {
+                    current.last_accessed_at = now;
                 }
-            }),
-        )?;
+            }
+            Some(document) => {
+                let should_reopen = document.language_id != language_id
+                    || !self.text_document_sync.supports_did_change;
+                if should_reopen {
+                    if self.text_document_sync.open_close {
+                        let _ = self.send_notification(
+                            "textDocument/didClose",
+                            json!({
+                                "textDocument": {
+                                    "uri": uri
+                                }
+                            }),
+                        );
+                    }
+                    self.send_notification(
+                        "textDocument/didOpen",
+                        json!({
+                            "textDocument": {
+                                "uri": uri,
+                                "languageId": language_id,
+                                "version": 1,
+                                "text": text
+                            }
+                        }),
+                    )?;
+                    self.open_documents.insert(
+                        uri.clone(),
+                        OpenDocumentState {
+                            language_id: language_id.to_string(),
+                            text,
+                            version: 1,
+                            last_accessed_at: now,
+                        },
+                    );
+                } else {
+                    let next_version = document.version.saturating_add(1);
+                    self.send_notification(
+                        "textDocument/didChange",
+                        json!({
+                            "textDocument": {
+                                "uri": uri,
+                                "version": next_version
+                            },
+                            "contentChanges": [{
+                                "text": text
+                            }]
+                        }),
+                    )?;
+                    self.open_documents.insert(
+                        uri.clone(),
+                        OpenDocumentState {
+                            language_id: language_id.to_string(),
+                            text,
+                            version: next_version,
+                            last_accessed_at: now,
+                        },
+                    );
+                    self.diagnostics_by_uri.remove(&uri);
+                }
+            }
+            None => {
+                self.send_notification(
+                    "textDocument/didOpen",
+                    json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": 1,
+                            "text": text
+                        }
+                    }),
+                )?;
+                self.open_documents.insert(
+                    uri.clone(),
+                    OpenDocumentState {
+                        language_id: language_id.to_string(),
+                        text,
+                        version: 1,
+                        last_accessed_at: now,
+                    },
+                );
+                self.diagnostics_by_uri.remove(&uri);
+            }
+        }
         Ok(uri)
+    }
+
+    fn set_workspace_settings(&mut self, workspace_settings: Value) -> Result<()> {
+        if self.workspace_settings == workspace_settings {
+            return Ok(());
+        }
+
+        self.workspace_settings = workspace_settings.clone();
+        self.send_notification(
+            "workspace/didChangeConfiguration",
+            json!({
+                "settings": workspace_settings
+            }),
+        )
+    }
+
+    fn close_document(&mut self, uri: &str) -> Result<()> {
+        if self.open_documents.remove(uri).is_none() {
+            return Ok(());
+        }
+
+        self.diagnostics_by_uri.remove(uri);
+        if self.text_document_sync.open_close {
+            self.send_notification(
+                "textDocument/didClose",
+                json!({
+                    "textDocument": {
+                        "uri": uri
+                    }
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn evict_open_documents(&mut self, max_open_documents: usize) -> Result<()> {
+        if self.open_documents.len() <= max_open_documents {
+            return Ok(());
+        }
+
+        let mut uris_by_age: Vec<(String, Instant)> = self
+            .open_documents
+            .iter()
+            .map(|(uri, document)| (uri.clone(), document.last_accessed_at))
+            .collect();
+        uris_by_age.sort_by_key(|(_, last_accessed_at)| *last_accessed_at);
+
+        let evict_count = self.open_documents.len().saturating_sub(max_open_documents);
+        for (uri, _) in uris_by_age.into_iter().take(evict_count) {
+            self.close_document(&uri)?;
+        }
+        Ok(())
     }
 
     fn collect_diagnostics(
@@ -542,8 +860,16 @@ impl LspTransport {
     }
 
     fn shutdown(&mut self) {
+        let uris: Vec<String> = self.open_documents.keys().cloned().collect();
+        for uri in uris {
+            let _ = self.close_document(&uri);
+        }
         let _ = self.send_request("shutdown", Value::Null, Duration::from_secs(2));
         let _ = self.send_notification("exit", json!({}));
+    }
+
+    fn process_has_exited(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_some()
     }
 
     fn recv_event(&self, timeout: Duration) -> Result<Option<ReaderEvent>> {
@@ -610,13 +936,9 @@ impl LspTransport {
 
         let result = match method {
             "workspace/configuration" => {
-                let item_count = params
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len);
-                Value::Array((0..item_count).map(|_| Value::Null).collect())
+                workspace_configuration_response(&self.workspace_settings, &params)
             }
-            "workspace/workspaceFolders" => Value::Array(Vec::new()),
+            "workspace/workspaceFolders" => workspace_folders_value(&self.workspace_root)?,
             "workspace/applyEdit" => json!({ "applied": false }),
             "window/showDocument" => json!({ "success": false }),
             _ => Value::Null,
@@ -638,7 +960,312 @@ impl LspTransport {
     }
 }
 
+impl LspServerSession {
+    fn start(
+        provider: &LspProvider,
+        server_config: &LspServerConfig,
+        workspace_root: &Path,
+        workspace_settings: Value,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let mut transport =
+            LspTransport::spawn(server_config, workspace_root, workspace_settings.clone())?;
+        transport.initialize(workspace_root, timeout)?;
+        transport.send_notification(
+            "workspace/didChangeConfiguration",
+            json!({
+                "settings": workspace_settings
+            }),
+        )?;
+
+        Ok(Self {
+            provider_id: provider.id.clone(),
+            workspace_root: workspace_root.to_path_buf(),
+            server_config: server_config.clone(),
+            workspace_settings,
+            transport,
+        })
+    }
+
+    fn refresh_workspace_settings(&mut self, workspace_settings: Value) -> Result<()> {
+        if self.workspace_settings == workspace_settings {
+            return Ok(());
+        }
+
+        self.transport
+            .set_workspace_settings(workspace_settings.clone())?;
+        self.workspace_settings = workspace_settings;
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.transport.shutdown();
+    }
+}
+
+impl LspSessionManager {
+    fn checkout_session(
+        &self,
+        key: &LspSessionKey,
+        provider: &LspProvider,
+        server_config: &LspServerConfig,
+        workspace_root: &Path,
+        workspace_settings: &Value,
+        timeout: Duration,
+    ) -> Result<Option<Arc<Mutex<LspServerSession>>>> {
+        let now = Instant::now();
+        let mut sessions_to_shutdown: Vec<Arc<Mutex<LspServerSession>>> = Vec::new();
+        let mut should_start_reaper = false;
+
+        let checkout_result = (|| {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow!("LSP session manager lock poisoned"))?;
+
+            sessions_to_shutdown.extend(Self::reap_idle_sessions(
+                &mut inner,
+                now,
+                self.config.idle_timeout,
+            ));
+
+            let should_reuse = inner
+                .sessions
+                .get(key)
+                .and_then(|entry| entry.session.lock().ok())
+                .map(|mut session| {
+                    !session.transport.process_has_exited()
+                        && session.server_config == *server_config
+                })
+                .unwrap_or(false);
+
+            if should_reuse {
+                if let Some(entry) = inner.sessions.get_mut(key) {
+                    entry.active_requests += 1;
+                    entry.last_used_at = now;
+                    return Ok(Some(Arc::clone(&entry.session)));
+                }
+            } else if let Some(evicted) = inner.sessions.remove(key) {
+                sessions_to_shutdown.push(evicted.session);
+            }
+
+            sessions_to_shutdown.extend(Self::evict_for_capacity(
+                &mut inner,
+                self.config.max_sessions,
+            ));
+
+            if inner.sessions.len() >= self.config.max_sessions {
+                return Ok(None);
+            }
+
+            let session = Arc::new(Mutex::new(LspServerSession::start(
+                provider,
+                server_config,
+                workspace_root,
+                workspace_settings.clone(),
+                timeout,
+            )?));
+            inner.sessions.insert(
+                key.clone(),
+                LspManagedSession {
+                    session: Arc::clone(&session),
+                    last_used_at: now,
+                    active_requests: 1,
+                },
+            );
+            should_start_reaper = true;
+            Ok(Some(session))
+        })();
+
+        self.shutdown_sessions(sessions_to_shutdown);
+        if should_start_reaper {
+            self.ensure_idle_reaper();
+        }
+        checkout_result
+    }
+
+    #[allow(clippy::needless_collect)]
+    fn reap_idle_sessions(
+        inner: &mut LspSessionManagerInner,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> Vec<Arc<Mutex<LspServerSession>>> {
+        let stale_keys: Vec<LspSessionKey> = inner
+            .sessions
+            .iter()
+            .filter(|(_, entry)| {
+                entry.active_requests == 0 && now.duration_since(entry.last_used_at) >= idle_timeout
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        stale_keys
+            .into_iter()
+            .filter_map(|key| inner.sessions.remove(&key).map(|entry| entry.session))
+            .collect()
+    }
+
+    fn evict_for_capacity(
+        inner: &mut LspSessionManagerInner,
+        max_sessions: usize,
+    ) -> Vec<Arc<Mutex<LspServerSession>>> {
+        if inner.sessions.len() < max_sessions {
+            return Vec::new();
+        }
+
+        let evictable_key = inner
+            .sessions
+            .iter()
+            .filter(|(_, entry)| entry.active_requests == 0)
+            .min_by_key(|(_, entry)| entry.last_used_at)
+            .map(|(key, _)| key.clone());
+
+        evictable_key
+            .into_iter()
+            .filter_map(|key| inner.sessions.remove(&key).map(|entry| entry.session))
+            .collect()
+    }
+
+    fn finish_session_use(&self, key: &LspSessionKey) {
+        if let Ok(mut inner) = self.inner.lock()
+            && let Some(entry) = inner.sessions.get_mut(key)
+        {
+            entry.active_requests = entry.active_requests.saturating_sub(1);
+            entry.last_used_at = Instant::now();
+        }
+    }
+
+    fn discard_session(&self, key: &LspSessionKey) -> Option<Arc<Mutex<LspServerSession>>> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut inner| inner.sessions.remove(key).map(|entry| entry.session))
+    }
+
+    fn shutdown_session_list(sessions: Vec<Arc<Mutex<LspServerSession>>>) {
+        for session in sessions {
+            if let Ok(mut session) = session.lock() {
+                session.shutdown();
+            }
+        }
+    }
+
+    fn shutdown_sessions(&self, sessions: Vec<Arc<Mutex<LspServerSession>>>) {
+        Self::shutdown_session_list(sessions);
+    }
+
+    pub(crate) fn shutdown_all(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let sessions = if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .sessions
+                .drain()
+                .map(|(_, entry)| entry.session)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        self.shutdown_sessions(sessions);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_persistent(
+        &self,
+        request: &LspToolRequest,
+        effective_action: &LspAction,
+        provider: &LspProvider,
+        server_config: &LspServerConfig,
+        workspace_root: &Path,
+        resolved_path: Option<&Path>,
+        timeout: Duration,
+        limit: usize,
+    ) -> Result<String> {
+        let key = LspSessionKey {
+            provider_id: provider.id.clone(),
+            workspace_root: workspace_root.to_path_buf(),
+        };
+        let workspace_settings = load_workspace_settings(workspace_root);
+        let session = self.checkout_session(
+            &key,
+            provider,
+            server_config,
+            workspace_root,
+            &workspace_settings,
+            timeout,
+        )?;
+        let Some(session) = session else {
+            return invoke_transient(
+                request,
+                effective_action,
+                provider,
+                server_config,
+                workspace_root,
+                resolved_path,
+                timeout,
+                limit,
+                self.config.max_open_documents,
+            );
+        };
+
+        let mut discard_cached_session = false;
+        let result = {
+            let mut session = session
+                .lock()
+                .map_err(|_| anyhow!("LSP session lock poisoned"))?;
+            if session.workspace_root != workspace_root || session.provider_id != provider.id {
+                discard_cached_session = true;
+                Err(anyhow!(
+                    "cached LSP session does not match requested workspace"
+                ))
+            } else if let Err(err) = session.refresh_workspace_settings(workspace_settings) {
+                discard_cached_session = true;
+                Err(err)
+            } else {
+                let session_server_config = session.server_config.clone();
+                let request_result = run_transport_request(
+                    &mut session.transport,
+                    request,
+                    effective_action,
+                    provider,
+                    &session_server_config,
+                    workspace_root,
+                    resolved_path,
+                    limit,
+                    self.config.max_open_documents,
+                    timeout,
+                );
+                if let Err(err) = &request_result {
+                    discard_cached_session = session.transport.process_has_exited()
+                        || should_discard_cached_session_after_error(err);
+                }
+                request_result
+            }
+        };
+
+        if discard_cached_session {
+            if let Some(session) = self.discard_session(&key) {
+                self.shutdown_sessions(vec![session]);
+            }
+        } else {
+            self.finish_session_use(&key);
+        }
+
+        result
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf) -> Result<String> {
+    invoke_with_session_manager(request, cwd, codex_home, None)
+}
+
+pub(crate) fn invoke_with_session_manager(
+    request: LspToolRequest,
+    cwd: PathBuf,
+    codex_home: PathBuf,
+    session_manager: Option<Arc<LspSessionManager>>,
+) -> Result<String> {
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or_else(default_timeout_ms));
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).max(1);
     let resolved_path = resolve_request_path(&cwd, request.path.as_deref())?;
@@ -690,14 +1317,110 @@ pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf)
     let workspace_root = resolve_workspace_root(&cwd, resolved_path.as_deref(), &provider)?;
     let server_config = provider.resolve_server_config()?;
 
-    let mut transport = LspTransport::spawn(&server_config, &workspace_root)?;
-    transport.initialize(&workspace_root, timeout)?;
+    if let Some(manager) = session_manager.filter(|manager| manager.persistent_enabled()) {
+        return manager.invoke_persistent(
+            &request,
+            &effective_action,
+            &provider,
+            &server_config,
+            &workspace_root,
+            resolved_path.as_deref(),
+            timeout,
+            limit,
+        );
+    }
 
+    invoke_stateless(
+        &request,
+        &effective_action,
+        &provider,
+        &server_config,
+        &workspace_root,
+        resolved_path.as_deref(),
+        timeout,
+        limit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_stateless(
+    request: &LspToolRequest,
+    effective_action: &LspAction,
+    provider: &LspProvider,
+    server_config: &LspServerConfig,
+    workspace_root: &Path,
+    resolved_path: Option<&Path>,
+    timeout: Duration,
+    limit: usize,
+) -> Result<String> {
+    invoke_transient(
+        request,
+        effective_action,
+        provider,
+        server_config,
+        workspace_root,
+        resolved_path,
+        timeout,
+        limit,
+        DEFAULT_MAX_OPEN_DOCUMENTS,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_transient(
+    request: &LspToolRequest,
+    effective_action: &LspAction,
+    provider: &LspProvider,
+    server_config: &LspServerConfig,
+    workspace_root: &Path,
+    resolved_path: Option<&Path>,
+    timeout: Duration,
+    limit: usize,
+    max_open_documents: usize,
+) -> Result<String> {
+    let workspace_settings = load_workspace_settings(workspace_root);
+    let mut transport =
+        LspTransport::spawn(server_config, workspace_root, workspace_settings.clone())?;
+    transport.initialize(workspace_root, timeout)?;
+    transport.send_notification(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": workspace_settings
+        }),
+    )?;
+    let result = run_transport_request(
+        &mut transport,
+        request,
+        effective_action,
+        provider,
+        server_config,
+        workspace_root,
+        resolved_path,
+        limit,
+        max_open_documents,
+        timeout,
+    );
+    transport.shutdown();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_transport_request(
+    transport: &mut LspTransport,
+    request: &LspToolRequest,
+    effective_action: &LspAction,
+    provider: &LspProvider,
+    server_config: &LspServerConfig,
+    workspace_root: &Path,
+    resolved_path: Option<&Path>,
+    limit: usize,
+    max_open_documents: usize,
+    timeout: Duration,
+) -> Result<String> {
     let mut opened_document_uri: Option<String> = None;
     let mut opened_document_path: Option<PathBuf> = None;
-    if effective_action != LspAction::WorkspaceSymbols {
+    if *effective_action != LspAction::WorkspaceSymbols {
         let path = resolved_path
-            .as_deref()
             .ok_or_else(|| anyhow!("path is required for {}", effective_action.as_str()))?;
         if !path.is_file() {
             bail!(
@@ -706,7 +1429,8 @@ pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf)
             );
         }
         let language_id = provider.language_id_for_path(path);
-        let uri = transport.open_document(path, &language_id)?;
+        let uri = transport.sync_document(path, &language_id)?;
+        transport.evict_open_documents(max_open_documents.max(1))?;
         opened_document_uri = Some(uri);
         opened_document_path = Some(path.to_path_buf());
     }
@@ -775,7 +1499,7 @@ pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf)
                     "uri": opened_document_uri.as_deref().ok_or_else(|| anyhow!("rename requires an opened document"))?
                 },
                 "position": position_value(request.line, request.column)?,
-                "newName": request.new_name.ok_or_else(|| anyhow!("rename requires new_name"))?
+                "newName": request.new_name.clone().ok_or_else(|| anyhow!("rename requires new_name"))?
             }),
             timeout,
         )?,
@@ -866,11 +1590,31 @@ pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf)
         }
     };
 
-    transport.shutdown();
+    render_lsp_result(
+        request,
+        effective_action,
+        provider,
+        server_config,
+        workspace_root,
+        opened_document_path,
+        raw_result,
+        limit,
+    )
+}
 
-    let mut normalized_result = raw_result;
-    normalize_value_for_output(&mut normalized_result);
-    truncate_result(&effective_action, &mut normalized_result, limit);
+#[allow(clippy::too_many_arguments)]
+fn render_lsp_result(
+    request: &LspToolRequest,
+    effective_action: &LspAction,
+    provider: &LspProvider,
+    server_config: &LspServerConfig,
+    workspace_root: &Path,
+    opened_document_path: Option<PathBuf>,
+    mut raw_result: Value,
+    limit: usize,
+) -> Result<String> {
+    normalize_value_for_output(&mut raw_result);
+    truncate_result(effective_action, &mut raw_result, limit);
 
     let payload = json!({
         "requested_action": request.action.as_str(),
@@ -880,9 +1624,328 @@ pub(crate) fn invoke(request: LspToolRequest, cwd: PathBuf, codex_home: PathBuf)
         "path": opened_document_path.map(|path| path.display().to_string()),
         "server_command": server_config.command,
         "server_args": server_config.args,
-        "result": normalized_result,
+        "result": raw_result,
     });
     Ok(serde_json::to_string_pretty(&payload)?)
+}
+
+fn env_var_truthy(key: &str) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn should_discard_cached_session_after_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    [
+        "closed before responding",
+        "failed to write",
+        "unexpected eof",
+        "missing content-length header",
+        "invalid content-length header",
+        "failed to start language server",
+        "timed out",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn workspace_folders_value(workspace_root: &Path) -> Result<Value> {
+    let uri = path_to_file_url(workspace_root)?;
+    let name = workspace_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(std::string::ToString::to_string)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| workspace_root.display().to_string());
+    Ok(Value::Array(vec![json!({
+        "uri": uri,
+        "name": name,
+    })]))
+}
+
+fn text_document_sync_support(initialize_result: &Value) -> TextDocumentSyncSupport {
+    let Some(sync_value) = initialize_result
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("textDocumentSync"))
+    else {
+        return TextDocumentSyncSupport::default();
+    };
+
+    match sync_value {
+        Value::Number(kind) => match kind.as_i64() {
+            Some(0) => TextDocumentSyncSupport {
+                open_close: false,
+                supports_did_change: false,
+            },
+            Some(1 | 2) => TextDocumentSyncSupport {
+                open_close: true,
+                supports_did_change: true,
+            },
+            _ => TextDocumentSyncSupport::default(),
+        },
+        Value::Object(map) => TextDocumentSyncSupport {
+            open_close: map
+                .get("openClose")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            supports_did_change: map
+                .get("change")
+                .and_then(Value::as_i64)
+                .is_some_and(|value| value >= 1),
+        },
+        _ => TextDocumentSyncSupport::default(),
+    }
+}
+
+fn load_workspace_settings(workspace_root: &Path) -> Value {
+    let settings_path = workspace_root.join(".vscode").join("settings.json");
+    let content = match fs::read_to_string(&settings_path) {
+        Ok(content) => content,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "failed to read VS Code workspace settings {}: {err}",
+                    settings_path.display()
+                );
+            }
+            return Value::Object(serde_json::Map::new());
+        }
+    };
+
+    match parse_jsonc_value(&content) {
+        Ok(parsed) => normalize_workspace_settings(&parsed),
+        Err(err) => {
+            warn!(
+                "failed to parse VS Code workspace settings {}: {err}",
+                settings_path.display()
+            );
+            Value::Object(serde_json::Map::new())
+        }
+    }
+}
+
+fn parse_jsonc_value(content: &str) -> Result<Value> {
+    let without_bom = content.trim_start_matches('\u{feff}');
+    let without_comments = strip_jsonc_comments(without_bom);
+    let without_trailing_commas = strip_trailing_json_commas(&without_comments);
+    Ok(serde_json::from_str(&without_trailing_commas)?)
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            output.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            continue;
+        }
+
+        if ch == '/' {
+            match chars.peek().copied() {
+                Some('/') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            output.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut previous = '\0';
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            output.push('\n');
+                        }
+                        if previous == '*' && next == '/' {
+                            break;
+                        }
+                        previous = next;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
+fn strip_trailing_json_commas(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut output = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if in_string {
+            output.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            continue;
+        }
+
+        if ch == ',' {
+            let next_non_whitespace = chars[index + 1..]
+                .iter()
+                .copied()
+                .find(|candidate| !candidate.is_whitespace());
+            if matches!(next_non_whitespace, Some('}') | Some(']') | None) {
+                continue;
+            }
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
+fn normalize_workspace_settings(value: &Value) -> Value {
+    normalize_workspace_value(value)
+}
+
+fn normalize_workspace_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut normalized = serde_json::Map::new();
+            for (key, entry_value) in map {
+                insert_workspace_setting(
+                    &mut normalized,
+                    key,
+                    normalize_workspace_value(entry_value),
+                );
+            }
+            Value::Object(normalized)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(normalize_workspace_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn insert_workspace_setting(root: &mut serde_json::Map<String, Value>, key: &str, value: Value) {
+    let segments: Vec<&str> = key
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return;
+    }
+    insert_workspace_setting_segments(root, &segments, value);
+}
+
+fn insert_workspace_setting_segments(
+    root: &mut serde_json::Map<String, Value>,
+    segments: &[&str],
+    value: Value,
+) {
+    if segments.len() == 1 {
+        match root.get_mut(segments[0]) {
+            Some(existing) => merge_json_value(existing, value),
+            None => {
+                root.insert(segments[0].to_string(), value);
+            }
+        }
+        return;
+    }
+
+    let child = root
+        .entry(segments[0].to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !child.is_object() {
+        *child = Value::Object(serde_json::Map::new());
+    }
+
+    if let Some(map) = child.as_object_mut() {
+        insert_workspace_setting_segments(map, &segments[1..], value);
+    }
+}
+
+fn merge_json_value(existing: &mut Value, incoming: Value) {
+    match (existing, incoming) {
+        (Value::Object(existing_map), Value::Object(incoming_map)) => {
+            for (key, value) in incoming_map {
+                match existing_map.get_mut(&key) {
+                    Some(existing_value) => merge_json_value(existing_value, value),
+                    None => {
+                        existing_map.insert(key, value);
+                    }
+                }
+            }
+        }
+        (existing_value, incoming_value) => {
+            *existing_value = incoming_value;
+        }
+    }
+}
+
+fn workspace_configuration_response(settings: &Value, params: &Value) -> Value {
+    let Some(items) = params.get("items").and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                let Some(section) = item
+                    .get("section")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|section| !section.is_empty())
+                else {
+                    return settings.clone();
+                };
+                lookup_workspace_setting(settings, section).unwrap_or(Value::Null)
+            })
+            .collect(),
+    )
+}
+
+fn lookup_workspace_setting(settings: &Value, section: &str) -> Option<Value> {
+    let mut current = settings;
+    for segment in section.split('.').filter(|segment| !segment.is_empty()) {
+        current = current.get(segment)?;
+    }
+    Some(current.clone())
 }
 
 fn default_timeout_ms() -> u64 {
@@ -1359,11 +2422,15 @@ fn probe_single_provider_status(
         }
     };
 
-    match LspTransport::spawn(&server_config, &workspace_root).and_then(|mut transport| {
-        let initialize_result = transport.initialize(&workspace_root, Duration::from_millis(3_000));
-        transport.shutdown();
-        initialize_result
-    }) {
+    let workspace_settings = load_workspace_settings(&workspace_root);
+    match LspTransport::spawn(&server_config, &workspace_root, workspace_settings).and_then(
+        |mut transport| {
+            let initialize_result =
+                transport.initialize(&workspace_root, Duration::from_millis(3_000));
+            transport.shutdown();
+            initialize_result
+        },
+    ) {
         Ok(()) => {
             status.status = "ready".to_string();
         }
@@ -1629,6 +2696,8 @@ mod tests {
     use super::find_workspace_root;
     use super::load_provider_registry;
     use super::normalize_value_for_output;
+    use super::parse_jsonc_value;
+    use super::workspace_configuration_response;
     use serde_json::json;
     use std::path::Path;
     use std::path::PathBuf;
@@ -1653,6 +2722,117 @@ mod tests {
         assert_eq!(value["range"]["start"]["character"], json!(2));
         assert_eq!(value["range"]["end"]["line"], json!(3));
         assert_eq!(value["range"]["end"]["character"], json!(4));
+    }
+
+    #[test]
+    fn parse_jsonc_value_accepts_comments_and_trailing_commas() {
+        let parsed = parse_jsonc_value(
+            r#"{
+                // line comment
+                "rust-analyzer.check.command": "clippy",
+                "gopls": {
+                    /* block comment */
+                    "ui.semanticTokens": true,
+                },
+            }"#,
+        )
+        .expect("parse jsonc settings");
+
+        assert_eq!(
+            parsed,
+            json!({
+                "rust-analyzer.check.command": "clippy",
+                "gopls": {
+                    "ui.semanticTokens": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_configuration_response_returns_nested_values_for_dotted_sections() {
+        let settings = json!({
+            "rust-analyzer": {
+                "check": {
+                    "command": "clippy",
+                    "features": "all"
+                }
+            },
+            "gopls": {
+                "ui": {
+                    "semanticTokens": true
+                }
+            }
+        });
+
+        let response = workspace_configuration_response(
+            &settings,
+            &json!({
+                "items": [
+                    { "section": "rust-analyzer" },
+                    { "section": "rust-analyzer.check" },
+                    { "section": "gopls.ui.semanticTokens" },
+                    { "section": "python.analysis" },
+                    {}
+                ]
+            }),
+        );
+
+        assert_eq!(
+            response,
+            json!([
+                {
+                    "check": {
+                        "command": "clippy",
+                        "features": "all"
+                    }
+                },
+                {
+                    "command": "clippy",
+                    "features": "all"
+                },
+                true,
+                null,
+                settings
+            ])
+        );
+    }
+
+    #[test]
+    fn load_workspace_settings_normalizes_vscode_dotted_keys() {
+        let tempdir = tempdir().expect("create tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let vscode_dir = workspace.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).expect("create .vscode dir");
+        std::fs::write(
+            vscode_dir.join("settings.json"),
+            r#"{
+                "rust-analyzer.check.command": "clippy",
+                "rust-analyzer.check.features": "all",
+                "gopls": {
+                    "ui.semanticTokens": true
+                }
+            }"#,
+        )
+        .expect("write settings.json");
+
+        let settings = super::load_workspace_settings(&workspace);
+        assert_eq!(
+            settings,
+            json!({
+                "rust-analyzer": {
+                    "check": {
+                        "command": "clippy",
+                        "features": "all"
+                    }
+                },
+                "gopls": {
+                    "ui": {
+                        "semanticTokens": true
+                    }
+                }
+            })
+        );
     }
 
     #[test]

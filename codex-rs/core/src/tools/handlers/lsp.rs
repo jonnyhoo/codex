@@ -19,7 +19,12 @@ impl ToolHandler for LspHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let ToolInvocation { payload, turn, .. } = invocation;
+        let ToolInvocation {
+            payload,
+            session,
+            turn,
+            ..
+        } = invocation;
 
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -33,13 +38,20 @@ impl ToolHandler for LspHandler {
         let request: LspToolRequest = parse_arguments(&arguments)?;
         let cwd = turn.cwd.clone();
         let codex_home = turn.config.codex_home.clone();
-        let rendered =
-            tokio::task::spawn_blocking(move || crate::lsp::invoke(request, cwd, codex_home))
-                .await
-                .map_err(|err| {
-                    FunctionCallError::RespondToModel(format!("failed to join lsp task: {err}"))
-                })?
-                .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
+        let lsp_session_manager = session.services.lsp_session_manager.clone();
+        let rendered = tokio::task::spawn_blocking(move || {
+            crate::lsp::invoke_with_session_manager(
+                request,
+                cwd,
+                codex_home,
+                Some(lsp_session_manager),
+            )
+        })
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("failed to join lsp task: {err}"))
+        })?
+        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
 
         Ok(ToolOutput::Function {
             body: FunctionCallOutputBody::Text(rendered),
