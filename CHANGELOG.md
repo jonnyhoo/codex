@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.2.2
+
+这个版本把“搜索实现”和“模型默认搜索习惯”一起收紧，目标不是让模型继续记参数，而是让 Codex CLI 自己默认避开依赖树和构建产物这类噪声目录。
+
+### Search Defaults
+
+- `grep_files` 默认跳过 `node_modules`、`dist`、`build`、`.next`、`coverage`、`target`
+- 增加 `include_generated_directories` 开关，显式需要时仍可把这些目录搜回来
+- 当显式包含生成目录时，同时关闭 ripgrep ignore-file 过滤，避免 `.ignore` / `.gitignore` 把结果继续吞掉
+
+### Prompting
+
+- 基础 prompt 默认改为优先用 `grep_files` + `read_file` 做仓库级搜索
+- `rg` 退回到 shell 中的聚焦搜索，而不是模型做大范围扫描时的默认入口
+- bundled `models.json` 和 prompt 模板已同步，避免运行时继续注入旧指令
+
+### Validation
+
+- `codex-core` 已通过 `cargo test -p codex-core grep_files`
+- `codex-core` 已通过 `cargo test -p codex-core get_base_instructions_no_user_content`
+- `codex-core` 已通过 `cargo test -p codex-core bundled_models_json_roundtrips`
+
 ## v0.2.1
 
 这个版本不继续扩大 LSP 常驻负担，而是针对 Rust 语言服务在 CLI 冷启动阶段最容易出现的“空结果”问题做收敛修复，重点是让现有 built-in LSP 更稳、更像 IDE，而不是更重。

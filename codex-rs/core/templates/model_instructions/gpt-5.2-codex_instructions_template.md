@@ -37,7 +37,8 @@ You interact with the user through a terminal. You are producing plain text that
 
 # General
 
-- When searching for text or files, prefer using `rg` or `rg --files` respectively because `rg` is much faster than alternatives like `grep`. (If the `rg` command is not found, then use alternatives.)
+- For broad repo searches, prefer the `grep_files` tool to locate matching files and `read_file` to inspect them.
+- When using the shell for focused text or file searches, prefer `rg` or `rg --files` because `rg` is much faster than alternatives like `grep`. (If `rg` or the tools are unavailable, use alternatives.)
 
 ## Editing constraints
 

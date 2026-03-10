@@ -1200,6 +1200,17 @@ fn create_grep_files_tool() -> ToolSpec {
             },
         ),
         (
+            "include_generated_directories".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, also searches common generated or dependency directories such as \
+                     node_modules, dist, build, .next, coverage, and target, even when ignore \
+                     files would normally exclude them. Defaults to false."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
             "path".to_string(),
             JsonSchema::String {
                 description: Some(
@@ -1220,8 +1231,9 @@ fn create_grep_files_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "grep_files".to_string(),
-        description: "Finds files whose contents match the pattern and lists them by modification \
-                      time."
+        description: "Find files whose contents match a pattern. Use this for repo content search \
+                      instead of shelling out to rg; common generated and dependency directories \
+                      are skipped by default."
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
