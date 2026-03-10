@@ -1075,6 +1075,14 @@ impl Session {
                         };
                         sess.send_event_raw(event).await;
                     }
+                    Ok(FileWatcherEvent::WorkspaceChanged { changes }) => {
+                        let Some(sess) = weak_sess.upgrade() else {
+                            break;
+                        };
+                        sess.services
+                            .lsp_session_manager
+                            .note_external_file_changes(&changes);
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 }

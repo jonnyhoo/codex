@@ -1620,6 +1620,15 @@ fn create_lsp_tool() -> ToolSpec {
             },
         ),
         (
+            "apply".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true for action=rename, apply the returned workspace edit to disk instead of only returning a preview summary. Defaults to false."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
             "include_declaration".to_string(),
             JsonSchema::Boolean {
                 description: Some(

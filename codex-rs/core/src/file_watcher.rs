@@ -23,15 +23,19 @@ use tokio::time::sleep_until;
 use tracing::warn;
 
 use crate::config::Config;
+use crate::lsp::LspWatchedFileChange;
+use crate::lsp::LspWatchedFileChangeKind;
 use crate::skills::SkillsManager;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileWatcherEvent {
     SkillsChanged { paths: Vec<PathBuf> },
+    WorkspaceChanged { changes: Vec<LspWatchedFileChange> },
 }
 
 struct WatchState {
     skills_root_ref_counts: HashMap<PathBuf, usize>,
+    workspace_root_ref_counts: HashMap<PathBuf, usize>,
 }
 
 struct FileWatcherInner {
@@ -85,6 +89,54 @@ impl ThrottledPaths {
     }
 }
 
+struct ThrottledWorkspaceChanges {
+    pending: HashMap<PathBuf, LspWatchedFileChangeKind>,
+    next_allowed_at: Instant,
+}
+
+impl ThrottledWorkspaceChanges {
+    fn new(now: Instant) -> Self {
+        Self {
+            pending: HashMap::new(),
+            next_allowed_at: now,
+        }
+    }
+
+    fn add(&mut self, changes: Vec<LspWatchedFileChange>) {
+        for change in changes {
+            self.pending.insert(change.path, change.kind);
+        }
+    }
+
+    fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        (!self.pending.is_empty() && now < self.next_allowed_at).then_some(self.next_allowed_at)
+    }
+
+    fn take_ready(&mut self, now: Instant) -> Option<Vec<LspWatchedFileChange>> {
+        if self.pending.is_empty() || now < self.next_allowed_at {
+            return None;
+        }
+        Some(self.take_with_next_allowed(now))
+    }
+
+    fn take_pending(&mut self, now: Instant) -> Option<Vec<LspWatchedFileChange>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(self.take_with_next_allowed(now))
+    }
+
+    fn take_with_next_allowed(&mut self, now: Instant) -> Vec<LspWatchedFileChange> {
+        let mut paths: Vec<_> = self.pending.drain().collect();
+        paths.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()));
+        self.next_allowed_at = now + WATCHER_THROTTLE_INTERVAL;
+        paths
+            .into_iter()
+            .map(|(path, kind)| LspWatchedFileChange { path, kind })
+            .collect()
+    }
+}
+
 pub(crate) struct FileWatcher {
     inner: Option<Mutex<FileWatcherInner>>,
     state: Arc<RwLock<WatchState>>,
@@ -93,7 +145,19 @@ pub(crate) struct FileWatcher {
 
 pub(crate) struct WatchRegistration {
     file_watcher: std::sync::Weak<FileWatcher>,
-    roots: Vec<PathBuf>,
+    roots: Vec<WatchRegistrationEntry>,
+}
+
+#[derive(Clone)]
+struct WatchRegistrationEntry {
+    root: PathBuf,
+    kind: WatchedRootKind,
+}
+
+#[derive(Clone, Copy)]
+enum WatchedRootKind {
+    Skills,
+    Workspace,
 }
 
 impl Drop for WatchRegistration {
@@ -118,6 +182,7 @@ impl FileWatcher {
         let (tx, _) = broadcast::channel(128);
         let state = Arc::new(RwLock::new(WatchState {
             skills_root_ref_counts: HashMap::new(),
+            workspace_root_ref_counts: HashMap::new(),
         }));
         let file_watcher = Self {
             inner: Some(Mutex::new(inner)),
@@ -134,6 +199,7 @@ impl FileWatcher {
             inner: None,
             state: Arc::new(RwLock::new(WatchState {
                 skills_root_ref_counts: HashMap::new(),
+                workspace_root_ref_counts: HashMap::new(),
             })),
             tx,
         }
@@ -161,7 +227,24 @@ impl FileWatcher {
 
         WatchRegistration {
             file_watcher: Arc::downgrade(self),
-            roots: registered_roots,
+            roots: registered_roots
+                .into_iter()
+                .map(|root| WatchRegistrationEntry {
+                    root,
+                    kind: WatchedRootKind::Skills,
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn register_workspace_root(self: &Arc<Self>, root: PathBuf) -> WatchRegistration {
+        self.register_root(root.clone(), WatchedRootKind::Workspace);
+        WatchRegistration {
+            file_watcher: Arc::downgrade(self),
+            roots: vec![WatchRegistrationEntry {
+                root,
+                kind: WatchedRootKind::Workspace,
+            }],
         }
     }
 
@@ -177,10 +260,14 @@ impl FileWatcher {
             handle.spawn(async move {
                 let now = Instant::now();
                 let mut skills = ThrottledPaths::new(now);
+                let mut workspace = ThrottledWorkspaceChanges::new(now);
 
                 loop {
                     let now = Instant::now();
-                    let next_deadline = skills.next_deadline(now);
+                    let next_deadline = [skills.next_deadline(now), workspace.next_deadline(now)]
+                        .into_iter()
+                        .flatten()
+                        .min();
                     let timer_deadline = next_deadline
                         .unwrap_or_else(|| now + Duration::from_secs(60 * 60 * 24 * 365));
                     let timer = sleep_until(timer_deadline);
@@ -190,12 +277,16 @@ impl FileWatcher {
                         res = raw_rx.recv() => {
                             match res {
                                 Some(Ok(event)) => {
-                                    let skills_paths = classify_event(&event, &state);
+                                    let classified = classify_event(&event, &state);
                                     let now = Instant::now();
-                                    skills.add(skills_paths);
+                                    skills.add(classified.skills_paths);
+                                    workspace.add(classified.workspace_changes);
 
                                     if let Some(paths) = skills.take_ready(now) {
                                         let _ = tx.send(FileWatcherEvent::SkillsChanged { paths });
+                                    }
+                                    if let Some(changes) = workspace.take_ready(now) {
+                                        let _ = tx.send(FileWatcherEvent::WorkspaceChanged { changes });
                                     }
                                 }
                                 Some(Err(err)) => {
@@ -208,6 +299,9 @@ impl FileWatcher {
                                     if let Some(paths) = skills.take_pending(now) {
                                         let _ = tx.send(FileWatcherEvent::SkillsChanged { paths });
                                     }
+                                    if let Some(changes) = workspace.take_pending(now) {
+                                        let _ = tx.send(FileWatcherEvent::WorkspaceChanged { changes });
+                                    }
                                     break;
                                 }
                             }
@@ -216,6 +310,9 @@ impl FileWatcher {
                             let now = Instant::now();
                             if let Some(paths) = skills.take_ready(now) {
                                 let _ = tx.send(FileWatcherEvent::SkillsChanged { paths });
+                            }
+                            if let Some(changes) = workspace.take_ready(now) {
+                                let _ = tx.send(FileWatcherEvent::WorkspaceChanged { changes });
                             }
                         }
                     }
@@ -227,34 +324,37 @@ impl FileWatcher {
     }
 
     fn register_skills_root(&self, root: PathBuf) {
+        self.register_root(root, WatchedRootKind::Skills);
+    }
+
+    fn register_root(&self, root: PathBuf, kind: WatchedRootKind) {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let count = state
-            .skills_root_ref_counts
-            .entry(root.clone())
-            .or_insert(0);
+        let counts = root_counts_mut(&mut state, kind);
+        let count = counts.entry(root.clone()).or_insert(0);
         *count += 1;
         if *count == 1 {
             self.watch_path(root, RecursiveMode::Recursive);
         }
     }
 
-    fn unregister_roots(&self, roots: &[PathBuf]) {
+    fn unregister_roots(&self, roots: &[WatchRegistrationEntry]) {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut inner_guard: Option<std::sync::MutexGuard<'_, FileWatcherInner>> = None;
 
-        for root in roots {
+        for entry in roots {
             let mut should_unwatch = false;
-            if let Some(count) = state.skills_root_ref_counts.get_mut(root) {
+            let counts = root_counts_mut(&mut state, entry.kind);
+            if let Some(count) = counts.get_mut(&entry.root) {
                 if *count > 1 {
                     *count -= 1;
                 } else {
-                    state.skills_root_ref_counts.remove(root);
+                    counts.remove(&entry.root);
                     should_unwatch = true;
                 }
             }
@@ -275,11 +375,11 @@ impl FileWatcher {
             let Some(guard) = inner_guard.as_mut() else {
                 continue;
             };
-            if guard.watched_paths.remove(root).is_none() {
+            if guard.watched_paths.remove(&entry.root).is_none() {
                 continue;
             }
-            if let Err(err) = guard.watcher.unwatch(root) {
-                warn!("failed to unwatch {}: {err}", root.display());
+            if let Err(err) = guard.watcher.unwatch(&entry.root) {
+                warn!("failed to unwatch {}: {err}", entry.root.display());
             }
         }
     }
@@ -311,42 +411,110 @@ impl FileWatcher {
     }
 }
 
-fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
-    if !matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    ) {
-        return Vec::new();
-    }
+struct ClassifiedEvent {
+    skills_paths: Vec<PathBuf>,
+    workspace_changes: Vec<LspWatchedFileChange>,
+}
 
-    let mut skills_paths = Vec::new();
-    let skills_roots = match state.read() {
-        Ok(state) => state
-            .skills_root_ref_counts
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>(),
-        Err(err) => {
-            let state = err.into_inner();
+fn classify_event(event: &Event, state: &RwLock<WatchState>) -> ClassifiedEvent {
+    let Some(default_change_kind) = event_kind_to_workspace_change_kind(event.kind) else {
+        return ClassifiedEvent {
+            skills_paths: Vec::new(),
+            workspace_changes: Vec::new(),
+        };
+    };
+
+    let (skills_roots, workspace_roots) = match state.read() {
+        Ok(state) => (
             state
                 .skills_root_ref_counts
                 .keys()
                 .cloned()
-                .collect::<HashSet<_>>()
+                .collect::<HashSet<_>>(),
+            state
+                .workspace_root_ref_counts
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
+        ),
+        Err(err) => {
+            let state = err.into_inner();
+            (
+                state
+                    .skills_root_ref_counts
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+                state
+                    .workspace_root_ref_counts
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<_>>(),
+            )
         }
     };
 
-    for path in &event.paths {
-        if is_skills_path(path, &skills_roots) {
+    let mut skills_paths = Vec::new();
+    let mut workspace_changes = Vec::new();
+    for (path, change_kind) in workspace_changes_for_event(event, default_change_kind) {
+        if is_path_under_roots(&path, &skills_roots) {
             skills_paths.push(path.clone());
+        }
+        if is_path_under_roots(&path, &workspace_roots) {
+            workspace_changes.push(LspWatchedFileChange {
+                path,
+                kind: change_kind,
+            });
         }
     }
 
-    skills_paths
+    ClassifiedEvent {
+        skills_paths,
+        workspace_changes,
+    }
 }
 
-fn is_skills_path(path: &Path, roots: &HashSet<PathBuf>) -> bool {
+fn is_path_under_roots(path: &Path, roots: &HashSet<PathBuf>) -> bool {
     roots.iter().any(|root| path.starts_with(root))
+}
+
+fn root_counts_mut(state: &mut WatchState, kind: WatchedRootKind) -> &mut HashMap<PathBuf, usize> {
+    match kind {
+        WatchedRootKind::Skills => &mut state.skills_root_ref_counts,
+        WatchedRootKind::Workspace => &mut state.workspace_root_ref_counts,
+    }
+}
+
+fn event_kind_to_workspace_change_kind(kind: EventKind) -> Option<LspWatchedFileChangeKind> {
+    match kind {
+        EventKind::Create(_) => Some(LspWatchedFileChangeKind::Created),
+        EventKind::Modify(_) => Some(LspWatchedFileChangeKind::Changed),
+        EventKind::Remove(_) => Some(LspWatchedFileChangeKind::Deleted),
+        _ => None,
+    }
+}
+
+fn workspace_changes_for_event(
+    event: &Event,
+    default_kind: LspWatchedFileChangeKind,
+) -> Vec<(PathBuf, LspWatchedFileChangeKind)> {
+    if matches!(
+        event.kind,
+        EventKind::Modify(notify::event::ModifyKind::Name(_))
+    ) && event.paths.len() >= 2
+    {
+        return vec![
+            (event.paths[0].clone(), LspWatchedFileChangeKind::Deleted),
+            (event.paths[1].clone(), LspWatchedFileChangeKind::Created),
+        ];
+    }
+
+    event
+        .paths
+        .iter()
+        .cloned()
+        .map(|path| (path, default_kind))
+        .collect()
 }
 
 #[cfg(test)]
@@ -413,6 +581,7 @@ mod tests {
         let root = path("/tmp/skills");
         let state = RwLock::new(WatchState {
             skills_root_ref_counts: HashMap::from([(root.clone(), 1)]),
+            workspace_root_ref_counts: HashMap::new(),
         });
         let event = notify_event(
             EventKind::Create(CreateKind::Any),
@@ -423,7 +592,8 @@ mod tests {
         );
 
         let classified = classify_event(&event, &state);
-        assert_eq!(classified, vec![root.join("demo/SKILL.md")]);
+        assert_eq!(classified.skills_paths, vec![root.join("demo/SKILL.md")]);
+        assert!(classified.workspace_changes.is_empty());
     }
 
     #[test]
@@ -432,6 +602,7 @@ mod tests {
         let root_b = path("/tmp/workspace/.codex/skills");
         let state = RwLock::new(WatchState {
             skills_root_ref_counts: HashMap::from([(root_a.clone(), 1), (root_b.clone(), 1)]),
+            workspace_root_ref_counts: HashMap::new(),
         });
         let event = notify_event(
             EventKind::Modify(ModifyKind::Any),
@@ -444,9 +615,10 @@ mod tests {
 
         let classified = classify_event(&event, &state);
         assert_eq!(
-            classified,
+            classified.skills_paths,
             vec![root_a.join("alpha/SKILL.md"), root_b.join("beta/SKILL.md")]
         );
+        assert!(classified.workspace_changes.is_empty());
     }
 
     #[test]
@@ -454,6 +626,7 @@ mod tests {
         let root = path("/tmp/skills");
         let state = RwLock::new(WatchState {
             skills_root_ref_counts: HashMap::from([(root.clone(), 1)]),
+            workspace_root_ref_counts: HashMap::new(),
         });
         let path = root.join("demo/SKILL.md");
 
@@ -461,13 +634,19 @@ mod tests {
             EventKind::Access(AccessKind::Open(AccessMode::Any)),
             vec![path.clone()],
         );
-        assert_eq!(classify_event(&access_event, &state), Vec::<PathBuf>::new());
+        let access_classified = classify_event(&access_event, &state);
+        assert!(access_classified.skills_paths.is_empty());
+        assert!(access_classified.workspace_changes.is_empty());
 
         let any_event = notify_event(EventKind::Any, vec![path.clone()]);
-        assert_eq!(classify_event(&any_event, &state), Vec::<PathBuf>::new());
+        let any_classified = classify_event(&any_event, &state);
+        assert!(any_classified.skills_paths.is_empty());
+        assert!(any_classified.workspace_changes.is_empty());
 
         let other_event = notify_event(EventKind::Other, vec![path]);
-        assert_eq!(classify_event(&other_event, &state), Vec::<PathBuf>::new());
+        let other_classified = classify_event(&other_event, &state);
+        assert!(other_classified.skills_paths.is_empty());
+        assert!(other_classified.workspace_changes.is_empty());
     }
 
     #[test]
@@ -489,7 +668,10 @@ mod tests {
         watcher.register_skills_root(root.clone());
         let registration = WatchRegistration {
             file_watcher: Arc::downgrade(&watcher),
-            roots: vec![root],
+            roots: vec![WatchRegistrationEntry {
+                root,
+                kind: WatchedRootKind::Skills,
+            }],
         };
 
         drop(registration);
@@ -513,7 +695,10 @@ mod tests {
         let unregister_watcher = Arc::clone(&watcher);
         let unregister_root = root.clone();
         let unregister_thread = std::thread::spawn(move || {
-            unregister_watcher.unregister_roots(&[unregister_root]);
+            unregister_watcher.unregister_roots(&[WatchRegistrationEntry {
+                root: unregister_root,
+                kind: WatchedRootKind::Skills,
+            }]);
         });
 
         let state_lock_observed = (0..100).any(|_| {
@@ -595,6 +780,57 @@ mod tests {
             FileWatcherEvent::SkillsChanged {
                 paths: vec![root.join("b/SKILL.md")]
             }
+        );
+    }
+
+    #[test]
+    fn classify_event_emits_workspace_changes_for_workspace_roots() {
+        let root = path("/tmp/workspace");
+        let state = RwLock::new(WatchState {
+            skills_root_ref_counts: HashMap::new(),
+            workspace_root_ref_counts: HashMap::from([(root.clone(), 1)]),
+        });
+        let event = notify_event(
+            EventKind::Create(CreateKind::File),
+            vec![root.join("src/main.rs"), path("/tmp/other/file.txt")],
+        );
+
+        let classified = classify_event(&event, &state);
+        assert!(classified.skills_paths.is_empty());
+        assert_eq!(
+            classified.workspace_changes,
+            vec![LspWatchedFileChange {
+                path: root.join("src/main.rs"),
+                kind: LspWatchedFileChangeKind::Created,
+            }]
+        );
+    }
+
+    #[test]
+    fn classify_event_maps_rename_to_delete_and_create_workspace_changes() {
+        let root = path("/tmp/workspace");
+        let state = RwLock::new(WatchState {
+            skills_root_ref_counts: HashMap::new(),
+            workspace_root_ref_counts: HashMap::from([(root.clone(), 1)]),
+        });
+        let event = notify_event(
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)),
+            vec![root.join("old.rs"), root.join("new.rs")],
+        );
+
+        let classified = classify_event(&event, &state);
+        assert_eq!(
+            classified.workspace_changes,
+            vec![
+                LspWatchedFileChange {
+                    path: root.join("old.rs"),
+                    kind: LspWatchedFileChangeKind::Deleted,
+                },
+                LspWatchedFileChange {
+                    path: root.join("new.rs"),
+                    kind: LspWatchedFileChangeKind::Created,
+                }
+            ]
         );
     }
 }

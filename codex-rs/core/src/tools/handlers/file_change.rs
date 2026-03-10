@@ -12,6 +12,8 @@ use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
+use crate::lsp::LspWatchedFileChange;
+use crate::lsp::LspWatchedFileChangeKind;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolOutput;
 use crate::tools::events::ToolEmitter;
@@ -52,9 +54,14 @@ pub(crate) async fn execute_verified_action(
     action: ApplyPatchAction,
     timeout_ms: Option<u64>,
 ) -> Result<ToolOutput, FunctionCallError> {
+    let watched_file_changes = watched_file_changes_for_action(&action);
     match apply_patch::apply_patch(turn.as_ref(), action).await {
         InternalApplyPatchInvocation::Output(item) => {
             let content = item?;
+            session
+                .services
+                .lsp_session_manager
+                .note_external_file_changes(&watched_file_changes);
             Ok(ToolOutput::Function {
                 body: FunctionCallOutputBody::Text(content),
                 success: Some(true),
@@ -96,12 +103,62 @@ pub(crate) async fn execute_verified_action(
                 .map(|result| result.output);
             let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), call_id, tracker);
             let content = emitter.finish(event_ctx, out).await?;
+            session
+                .services
+                .lsp_session_manager
+                .note_external_file_changes(&watched_file_changes);
             Ok(ToolOutput::Function {
                 body: FunctionCallOutputBody::Text(content),
                 success: Some(true),
             })
         }
     }
+}
+
+pub(crate) fn watched_file_changes_for_action(
+    action: &ApplyPatchAction,
+) -> Vec<LspWatchedFileChange> {
+    let cwd = action.cwd.as_path();
+    let mut changes = Vec::new();
+
+    for (path, change) in action.changes() {
+        let Some(resolved_path) = to_abs_path(cwd, path).map(AbsolutePathBuf::into_path_buf) else {
+            continue;
+        };
+
+        match change {
+            ApplyPatchFileChange::Add { .. } => changes.push(LspWatchedFileChange {
+                path: resolved_path,
+                kind: LspWatchedFileChangeKind::Created,
+            }),
+            ApplyPatchFileChange::Delete { .. } => changes.push(LspWatchedFileChange {
+                path: resolved_path,
+                kind: LspWatchedFileChangeKind::Deleted,
+            }),
+            ApplyPatchFileChange::Update { move_path, .. } => {
+                if let Some(move_path) = move_path
+                    && let Some(destination_path) =
+                        to_abs_path(cwd, move_path).map(AbsolutePathBuf::into_path_buf)
+                {
+                    changes.push(LspWatchedFileChange {
+                        path: resolved_path,
+                        kind: LspWatchedFileChangeKind::Deleted,
+                    });
+                    changes.push(LspWatchedFileChange {
+                        path: destination_path,
+                        kind: LspWatchedFileChangeKind::Created,
+                    });
+                } else {
+                    changes.push(LspWatchedFileChange {
+                        path: resolved_path,
+                        kind: LspWatchedFileChangeKind::Changed,
+                    });
+                }
+            }
+        }
+    }
+
+    changes
 }
 
 pub(crate) fn render_rewrite_patch(
@@ -212,5 +269,31 @@ mod tests {
 
         let keys = file_paths_for_action(&action);
         assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn watched_file_changes_map_move_to_delete_and_create() {
+        let tmp = TempDir::new().expect("tmp");
+        let cwd = tmp.path();
+        std::fs::create_dir_all(cwd.join("old")).expect("create old dir");
+        std::fs::create_dir_all(cwd.join("renamed/dir")).expect("create dest dir");
+        std::fs::write(cwd.join("old/name.txt"), "old content\n").expect("write old file");
+        let patch = r#"*** Begin Patch
+*** Update File: old/name.txt
+*** Move to: renamed/dir/name.txt
+@@
+-old content
++new content
+*** End Patch"#;
+        let argv = vec!["apply_patch".to_string(), patch.to_string()];
+        let action = match codex_apply_patch::maybe_parse_apply_patch_verified(&argv, cwd) {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected patch body, got: {other:?}"),
+        };
+
+        let watched_changes = watched_file_changes_for_action(&action);
+        assert_eq!(watched_changes.len(), 2);
+        assert_eq!(watched_changes[0].kind, LspWatchedFileChangeKind::Deleted);
+        assert_eq!(watched_changes[1].kind, LspWatchedFileChangeKind::Created);
     }
 }

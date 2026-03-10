@@ -39,12 +39,14 @@ impl ToolHandler for LspHandler {
         let cwd = turn.cwd.clone();
         let codex_home = turn.config.codex_home.clone();
         let lsp_session_manager = session.services.lsp_session_manager.clone();
+        let file_watcher = session.services.file_watcher.clone();
         let rendered = tokio::task::spawn_blocking(move || {
             crate::lsp::invoke_with_session_manager(
                 request,
                 cwd,
                 codex_home,
                 Some(lsp_session_manager),
+                Some(file_watcher),
             )
         })
         .await
