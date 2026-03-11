@@ -50,6 +50,15 @@ Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your 
 
 You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
 
+## Fork-specific notes
+
+- Current fork release target is `0.3.0`, rebased onto upstream `rust-v0.114.0`.
+- This fork publishes the npm package as `@jonnyhoo/codex`.
+- It adds built-in LSP tooling, first-class `write_file` and `edit_file` tools, and TUI visibility for provider health and status.
+- It also tightens broad repo search defaults by preferring `grep_files` and skipping common generated or dependency directories unless explicitly requested.
+- Native Windows development is supported through `scripts/windows/just.cmd`; see [Installing & building](./docs/install.md) for the MSVC-shell workflow.
+- Component-specific notes live in [`codex-rs/core/README.md`](./codex-rs/core/README.md) and [`codex-rs/tui/README.md`](./codex-rs/tui/README.md).
+
 ## Docs
 
 - [**Codex Documentation**](https://developers.openai.com/codex)

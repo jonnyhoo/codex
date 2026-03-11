@@ -1,0 +1,17 @@
+{
+  "id": "java",
+  "aliases": ["java"],
+  "fileExtensions": ["java"],
+  "workspaceMarkers": [
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    ".git"
+  ],
+  "command": "jdtls",
+  "args": [
+    "-data",
+    ".codex-java-workspace"
+  ],
+  "languageId": "java"
+}

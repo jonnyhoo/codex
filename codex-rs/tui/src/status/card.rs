@@ -5,6 +5,7 @@ use crate::history_cell::with_border_with_inner_width;
 use crate::version::CODEX_CLI_VERSION;
 use chrono::DateTime;
 use chrono::Local;
+use codex_core::LspProviderStatus;
 use codex_core::WireApi;
 use codex_core::config::Config;
 use codex_protocol::ThreadId;
@@ -74,6 +75,7 @@ struct StatusHistoryCell {
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
     rate_limits: StatusRateLimitData,
+    lsp_providers: Vec<LspProviderStatus>,
 }
 
 #[cfg(test)]
@@ -108,6 +110,7 @@ pub(crate) fn new_status_output(
         model_name,
         collaboration_mode,
         reasoning_effort_override,
+        Vec::new(),
     )
 }
 
@@ -126,6 +129,7 @@ pub(crate) fn new_status_output_with_rate_limits(
     model_name: &str,
     collaboration_mode: Option<&str>,
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
+    lsp_providers: Vec<LspProviderStatus>,
 ) -> CompositeHistoryCell {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let card = StatusHistoryCell::new(
@@ -142,6 +146,7 @@ pub(crate) fn new_status_output_with_rate_limits(
         model_name,
         collaboration_mode,
         reasoning_effort_override,
+        lsp_providers,
     );
 
     CompositeHistoryCell::new(vec![Box::new(command), Box::new(card)])
@@ -163,6 +168,7 @@ impl StatusHistoryCell {
         model_name: &str,
         collaboration_mode: Option<&str>,
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
+        lsp_providers: Vec<LspProviderStatus>,
     ) -> Self {
         let mut config_entries = vec![
             ("workdir", config.cwd.display().to_string()),
@@ -267,7 +273,70 @@ impl StatusHistoryCell {
             forked_from,
             token_usage,
             rate_limits,
+            lsp_providers,
         }
+    }
+
+    fn lsp_provider_lines(&self, formatter: &FieldFormatter) -> Vec<Line<'static>> {
+        if self.lsp_providers.is_empty() {
+            return vec![formatter.line("LSP", vec![Span::from("disabled").dim()])];
+        }
+
+        let ready_ids: Vec<String> = self
+            .lsp_providers
+            .iter()
+            .filter(|provider| provider.status == "ready")
+            .map(|provider| provider.id.clone())
+            .collect();
+        let failed_ids: Vec<String> = self
+            .lsp_providers
+            .iter()
+            .filter(|provider| provider.status == "failed")
+            .map(|provider| provider.id.clone())
+            .collect();
+        let unavailable_ids: Vec<String> = self
+            .lsp_providers
+            .iter()
+            .filter(|provider| provider.status == "unavailable")
+            .map(|provider| provider.id.clone())
+            .collect();
+
+        let mut lines = vec![formatter.line(
+            "LSP",
+            vec![Span::from(format!(
+                "{} ready, {} failed, {} unavailable",
+                ready_ids.len(),
+                failed_ids.len(),
+                unavailable_ids.len()
+            ))],
+        )];
+
+        if !ready_ids.is_empty() {
+            lines.push(formatter.line("LSP ready", vec![Span::from(ready_ids.join(", "))]));
+        }
+        if !failed_ids.is_empty() {
+            lines.push(formatter.line("LSP failed", vec![Span::from(failed_ids.join(", ")).red()]));
+        }
+        if !unavailable_ids.is_empty() {
+            lines.push(formatter.line(
+                "LSP unavailable",
+                vec![Span::from(unavailable_ids.join(", ")).yellow()],
+            ));
+        }
+
+        if let Some(provider) = self
+            .lsp_providers
+            .iter()
+            .find(|provider| provider.status != "ready")
+            && let Some(error) = provider.error.as_ref()
+        {
+            lines.push(formatter.line(
+                "LSP detail",
+                vec![Span::from(format!("{}: {}", provider.id, error)).dim()],
+            ));
+        }
+
+        lines
     }
 
     fn token_usage_spans(&self) -> Vec<Span<'static>> {
@@ -524,6 +593,7 @@ impl HistoryCell for StatusHistoryCell {
         {
             lines.push(formatter.line("Forked from", vec![Span::from(forked_from.clone())]));
         }
+        lines.extend(self.lsp_provider_lines(&formatter));
 
         lines.push(Line::from(Vec::<Span<'static>>::new()));
         // Hide token usage only for ChatGPT subscribers

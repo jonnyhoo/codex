@@ -19,6 +19,14 @@ pub struct GrepFilesHandler;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 2000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_EXCLUDE_GLOBS: &[&str] = &[
+    "!node_modules/**",
+    "!dist/**",
+    "!build/**",
+    "!.next/**",
+    "!coverage/**",
+    "!target/**",
+];
 
 fn default_limit() -> usize {
     DEFAULT_LIMIT
@@ -29,6 +37,8 @@ struct GrepFilesArgs {
     pattern: String,
     #[serde(default)]
     include: Option<String>,
+    #[serde(default)]
+    include_generated_directories: bool,
     #[serde(default)]
     path: Option<String>,
     #[serde(default = "default_limit")]
@@ -83,8 +93,15 @@ impl ToolHandler for GrepFilesHandler {
             }
         });
 
-        let search_results =
-            run_rg_search(pattern, include.as_deref(), &search_path, limit, &turn.cwd).await?;
+        let search_results = run_rg_search(
+            pattern,
+            include.as_deref(),
+            args.include_generated_directories,
+            &search_path,
+            limit,
+            &turn.cwd,
+        )
+        .await?;
 
         if search_results.is_empty() {
             Ok(FunctionToolOutput::from_text(
@@ -110,6 +127,7 @@ async fn verify_path_exists(path: &Path) -> Result<(), FunctionCallError> {
 async fn run_rg_search(
     pattern: &str,
     include: Option<&str>,
+    include_generated_directories: bool,
     search_path: &Path,
     limit: usize,
     cwd: &Path,
@@ -125,6 +143,13 @@ async fn run_rg_search(
 
     if let Some(glob) = include {
         command.arg("--glob").arg(glob);
+    }
+    if include_generated_directories {
+        command.arg("--no-ignore");
+    } else {
+        for glob in DEFAULT_EXCLUDE_GLOBS {
+            command.arg("--glob").arg(glob);
+        }
     }
 
     command.arg("--").arg(search_path);
@@ -208,7 +233,7 @@ mod tests {
         std::fs::write(dir.join("match_two.txt"), "alpha delta").unwrap();
         std::fs::write(dir.join("other.txt"), "omega").unwrap();
 
-        let results = run_rg_search("alpha", None, dir, 10, dir).await?;
+        let results = run_rg_search("alpha", None, false, dir, 10, dir).await?;
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|path| path.ends_with("match_one.txt")));
         assert!(results.iter().any(|path| path.ends_with("match_two.txt")));
@@ -225,7 +250,7 @@ mod tests {
         std::fs::write(dir.join("match_one.rs"), "alpha beta gamma").unwrap();
         std::fs::write(dir.join("match_two.txt"), "alpha delta").unwrap();
 
-        let results = run_rg_search("alpha", Some("*.rs"), dir, 10, dir).await?;
+        let results = run_rg_search("alpha", Some("*.rs"), false, dir, 10, dir).await?;
         assert_eq!(results.len(), 1);
         assert!(results.iter().all(|path| path.ends_with("match_one.rs")));
         Ok(())
@@ -242,7 +267,7 @@ mod tests {
         std::fs::write(dir.join("two.txt"), "alpha two").unwrap();
         std::fs::write(dir.join("three.txt"), "alpha three").unwrap();
 
-        let results = run_rg_search("alpha", None, dir, 2, dir).await?;
+        let results = run_rg_search("alpha", None, false, dir, 2, dir).await?;
         assert_eq!(results.len(), 2);
         Ok(())
     }
@@ -256,8 +281,51 @@ mod tests {
         let dir = temp.path();
         std::fs::write(dir.join("one.txt"), "omega").unwrap();
 
-        let results = run_rg_search("alpha", None, dir, 5, dir).await?;
+        let results = run_rg_search("alpha", None, false, dir, 5, dir).await?;
         assert!(results.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_search_skips_generated_directories_by_default() -> anyhow::Result<()> {
+        if !rg_available() {
+            return Ok(());
+        }
+        let temp = tempdir().expect("create temp dir");
+        let dir = temp.path();
+        let src_dir = dir.join("src");
+        let node_modules_dir = dir.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&node_modules_dir).unwrap();
+        std::fs::write(dir.join(".ignore"), "node_modules/\n").unwrap();
+        std::fs::write(src_dir.join("match.rs"), "alpha source").unwrap();
+        std::fs::write(node_modules_dir.join("match.js"), "alpha dependency").unwrap();
+
+        let results = run_rg_search("alpha", None, false, dir, 10, dir).await?;
+        assert_eq!(results.len(), 1);
+        assert!(results.iter().all(|path| path.ends_with("match.rs")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_search_can_include_generated_directories() -> anyhow::Result<()> {
+        if !rg_available() {
+            return Ok(());
+        }
+        let temp = tempdir().expect("create temp dir");
+        let dir = temp.path();
+        let src_dir = dir.join("src");
+        let node_modules_dir = dir.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&node_modules_dir).unwrap();
+        std::fs::write(dir.join(".ignore"), "node_modules/\n").unwrap();
+        std::fs::write(src_dir.join("match.rs"), "alpha source").unwrap();
+        std::fs::write(node_modules_dir.join("match.js"), "alpha dependency").unwrap();
+
+        let results = run_rg_search("alpha", None, true, dir, 10, dir).await?;
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|path| path.ends_with("match.rs")));
+        assert!(results.iter().any(|path| path.ends_with("match.js")));
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 // Unified entry point for the Codex CLI.
 
 import { spawn } from "node:child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { createRequire } from "node:module";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -12,14 +12,42 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
-const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
-  "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
-  "x86_64-apple-darwin": "@openai/codex-darwin-x64",
-  "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
-  "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
-  "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
+const PACKAGE_JSON_PATH = path.join(__dirname, "..", "package.json");
+const DEFAULT_PACKAGE_NAME = "@jonnyhoo/codex";
+const PLATFORM_SUFFIX_BY_TARGET = {
+  "x86_64-unknown-linux-musl": "linux-x64",
+  "aarch64-unknown-linux-musl": "linux-arm64",
+  "x86_64-apple-darwin": "darwin-x64",
+  "aarch64-apple-darwin": "darwin-arm64",
+  "x86_64-pc-windows-msvc": "win32-x64",
+  "aarch64-pc-windows-msvc": "win32-arm64",
 };
+
+function readPackageName() {
+  try {
+    const packageJson = JSON.parse(readFileSync(PACKAGE_JSON_PATH, "utf8"));
+    if (typeof packageJson.name === "string" && packageJson.name.length > 0) {
+      return packageJson.name;
+    }
+  } catch {
+    // Ignore package.json parsing failures and fall back to the repo default.
+  }
+
+  return DEFAULT_PACKAGE_NAME;
+}
+
+function withPlatformSuffix(packageName, suffix) {
+  if (packageName.startsWith("@")) {
+    const slashIndex = packageName.indexOf("/");
+    if (slashIndex !== -1) {
+      const scope = packageName.slice(0, slashIndex);
+      const baseName = packageName.slice(slashIndex + 1);
+      return `${scope}/${baseName}-${suffix}`;
+    }
+  }
+
+  return `${packageName}-${suffix}`;
+}
 
 const { platform, arch } = process;
 
@@ -70,10 +98,15 @@ if (!targetTriple) {
   throw new Error(`Unsupported platform: ${platform} (${arch})`);
 }
 
-const platformPackage = PLATFORM_PACKAGE_BY_TARGET[targetTriple];
-if (!platformPackage) {
+const basePackageName = readPackageName();
+const platformPackageSuffix = PLATFORM_SUFFIX_BY_TARGET[targetTriple];
+if (!platformPackageSuffix) {
   throw new Error(`Unsupported target triple: ${targetTriple}`);
 }
+const platformPackage = withPlatformSuffix(
+  basePackageName,
+  platformPackageSuffix,
+);
 
 const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
 const localVendorRoot = path.join(__dirname, "..", "vendor");
@@ -95,8 +128,8 @@ try {
     const packageManager = detectPackageManager();
     const updateCommand =
       packageManager === "bun"
-        ? "bun install -g @openai/codex@latest"
-        : "npm install -g @openai/codex@latest";
+        ? `bun install -g ${basePackageName}@latest`
+        : `npm install -g ${basePackageName}@latest`;
     throw new Error(
       `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
     );
@@ -107,8 +140,8 @@ if (!vendorRoot) {
   const packageManager = detectPackageManager();
   const updateCommand =
     packageManager === "bun"
-      ? "bun install -g @openai/codex@latest"
-      : "npm install -g @openai/codex@latest";
+      ? `bun install -g ${basePackageName}@latest`
+      : `npm install -g ${basePackageName}@latest`;
   throw new Error(
     `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
   );

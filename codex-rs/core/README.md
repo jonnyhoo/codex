@@ -44,4 +44,22 @@ Expects the binary containing `codex-core` to run the equivalent of `codex sandb
 
 ### All Platforms
 
-Expects the binary containing `codex-core` to simulate the virtual `apply_patch` CLI when `arg1` is `--codex-run-as-apply-patch`. See the `codex-arg0` crate for details.
+Expects the binary containing `codex-core` to simulate the virtual `apply_patch` CLI when `arg1` is `--codex-run-as-apply-patch`, and to support patch-file self invocation when `arg1` is `--codex-run-as-apply-patch-file`. See the `codex-arg0` crate for details.
+
+## Fork-specific additions
+
+This fork extends `codex-core` with local-code editing and language-aware tooling that is meant to be used directly by the model, not exposed as a separate setup burden for the user.
+
+- Built-in `lsp` tool support with provider registry, session-scoped persistence, workspace file watching, and health/status reporting.
+- Built-in `write_file` and `edit_file` function tools for full-file rewrites and exact text replacement.
+- `apply_patch` integration hardened to preserve LSP/workspace synchronization and to avoid Windows command-line length failures by using patch-file self invocation when sandboxed.
+- Broader repo search behavior steers the model toward `grep_files`, with generated and dependency directories skipped by default unless explicitly requested.
+
+Key fork-specific files:
+
+- `src/lsp.rs`
+- `src/tools/handlers/lsp.rs`
+- `src/tools/handlers/write_file.rs`
+- `src/tools/handlers/edit_file.rs`
+- `src/tools/handlers/file_change.rs`
+- `src/tools/spec.rs`

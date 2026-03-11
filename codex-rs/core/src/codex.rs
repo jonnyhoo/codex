@@ -199,6 +199,7 @@ use crate::file_watcher::FileWatcher;
 use crate::file_watcher::FileWatcherEvent;
 use crate::git_info::get_git_repo_root;
 use crate::instructions::UserInstructions;
+use crate::lsp::LspSessionManager;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::McpManager;
 use crate::mcp::auth::compute_auth_statuses;
@@ -1147,6 +1148,14 @@ impl Session {
                         };
                         sess.send_event_raw(event).await;
                     }
+                    Ok(FileWatcherEvent::WorkspaceChanged { changes }) => {
+                        let Some(sess) = weak_sess.upgrade() else {
+                            break;
+                        };
+                        sess.services
+                            .lsp_session_manager
+                            .note_external_file_changes(&changes);
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 }
@@ -1608,6 +1617,7 @@ impl Session {
             unified_exec_manager: UnifiedExecProcessManager::new(
                 config.background_terminal_max_timeout,
             ),
+            lsp_session_manager: Arc::new(LspSessionManager::new()),
             shell_zsh_path: config.zsh_path.clone(),
             main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
             analytics_events_client: AnalyticsEventsClient::new(
@@ -5045,6 +5055,8 @@ mod handlers {
             .unified_exec_manager
             .terminate_all_processes()
             .await;
+        let lsp_session_manager = Arc::clone(&sess.services.lsp_session_manager);
+        let _ = tokio::task::spawn_blocking(move || lsp_session_manager.shutdown_all()).await;
         info!("Shutting down Codex instance");
         let history = sess.clone_history().await;
         let turn_count = history

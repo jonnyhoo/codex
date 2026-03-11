@@ -98,6 +98,7 @@ fn build_file_watcher(codex_home: PathBuf, skills_manager: Arc<SkillsManager>) -
                     Ok(FileWatcherEvent::SkillsChanged { .. }) => {
                         skills_manager.clear_cache();
                     }
+                    Ok(FileWatcherEvent::WorkspaceChanged { .. }) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 }

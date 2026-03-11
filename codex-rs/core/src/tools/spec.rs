@@ -1286,6 +1286,17 @@ fn create_grep_files_tool() -> ToolSpec {
             },
         ),
         (
+            "include_generated_directories".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, also searches common generated or dependency directories such as \
+                     node_modules, dist, build, .next, coverage, and target, even when ignore \
+                     files would normally exclude them. Defaults to false."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
             "path".to_string(),
             JsonSchema::String {
                 description: Some(
@@ -1306,8 +1317,9 @@ fn create_grep_files_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "grep_files".to_string(),
-        description: "Finds files whose contents match the pattern and lists them by modification \
-                      time."
+        description: "Find files whose contents match a pattern. Use this for repo content search \
+                      instead of shelling out to rg; common generated and dependency directories \
+                      are skipped by default."
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
@@ -1469,6 +1481,105 @@ fn create_read_file_tool() -> ToolSpec {
     })
 }
 
+fn create_write_file_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "file_path".to_string(),
+            JsonSchema::String {
+                description: Some("Absolute path to the file to create or replace.".to_string()),
+            },
+        ),
+        (
+            "content".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Complete file contents to write. Use this when creating a file or rewriting most of an existing file."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "write_file".to_string(),
+        description:
+            "Creates a new local text file or replaces the full contents of an existing local text file."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["file_path".to_string(), "content".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
+fn create_edit_file_tool() -> ToolSpec {
+    let edit_properties = BTreeMap::from([
+        (
+            "old_text".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Existing text to replace. Provide enough surrounding context to make the match unique."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "new_text".to_string(),
+            JsonSchema::String {
+                description: Some("Replacement text for this edit.".to_string()),
+            },
+        ),
+        (
+            "replace_all".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, replace every exact occurrence of old_text instead of requiring a unique match."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    let properties = BTreeMap::from([
+        (
+            "file_path".to_string(),
+            JsonSchema::String {
+                description: Some("Absolute path to the existing file to edit.".to_string()),
+            },
+        ),
+        (
+            "edits".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::Object {
+                    properties: edit_properties,
+                    required: Some(vec!["old_text".to_string(), "new_text".to_string()]),
+                    additional_properties: Some(false.into()),
+                }),
+                description: Some(
+                    "One or more exact text replacements to apply sequentially to the file."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "edit_file".to_string(),
+        description: "Applies one or more exact text replacements to an existing local text file."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["file_path".to_string(), "edits".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
 fn create_list_dir_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -1510,6 +1621,167 @@ fn create_list_dir_tool() -> ToolSpec {
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["dir_path".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
+fn create_lsp_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "action".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "LSP action: \"auto\", \"providers\", \"diagnostics\", \"definition\", \"references\", \"hover\", \"document_symbols\", \"workspace_symbols\", \"rename\", \"completion\", \"signature_help\", or \"code_actions\". Use \"auto\" when the user asks natural-language code questions and you want the tool to choose the best LSP operation."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "path".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional local file or directory path. Relative paths resolve from the turn cwd. Required for all actions except providers and workspace_symbols."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "language".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional language override, for example python, go, rust, typescript, javascript, or a hot-plugged provider such as java. Useful for providers, auto, or workspace_symbols when no path is provided."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "goal".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional natural-language intent for action=auto, such as \"where does this value come from\", \"what uses this function\", \"what is this symbol\", or \"why is this file failing\". The user does not need to know LSP terms."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "line".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "1-indexed line number for position-based actions such as definition, hover, completion, rename, and code_actions."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "column".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "1-indexed column number for position-based actions such as definition, hover, completion, rename, and code_actions."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "end_line".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional 1-indexed end line for code_actions ranges. Defaults to line when omitted."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "end_column".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional 1-indexed end column for code_actions ranges. Defaults to column when omitted."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "query".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional workspace symbol query string used by workspace_symbols."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "new_name".to_string(),
+            JsonSchema::String {
+                description: Some("Required new symbol name for rename.".to_string()),
+            },
+        ),
+        (
+            "apply".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true for action=rename, apply the returned workspace edit to disk instead of only returning a preview summary. Defaults to false."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "include_declaration".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "Whether references should include the declaration location. Defaults to true."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional maximum number of results to return for list-like actions such as references, diagnostics, completion, symbols, and code_actions."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "trigger_character".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional completion/signature_help trigger character supplied to the language server."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "only".to_string(),
+            JsonSchema::Array {
+                items: Box::new(JsonSchema::String { description: None }),
+                description: Some(
+                    "Optional code action kinds filter, for example [\"quickfix\", \"source.organizeImports\"]."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "timeout_ms".to_string(),
+            JsonSchema::Number {
+                description: Some(
+                    "Optional per-request timeout in milliseconds. Defaults to CODEX_LSP_TIMEOUT_MS or 15000."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "lsp".to_string(),
+        description:
+            "Language-aware local code intelligence backed by Language Server Protocol providers. Use this automatically when the user asks what code does, where data comes from, what uses a symbol, where an error originates, or why one change affects another. Users do not need to mention LSP. action=auto is the LLM-friendly default. action=providers reports which LSP languages are enabled and whether their servers are available. Additional providers can be hot-plugged by dropping JSON definitions into .codex/lsp-providers in the workspace or CODEx home."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["action".to_string()]),
             additional_properties: Some(false.into()),
         },
         output_schema: None,
@@ -1930,10 +2202,12 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ArtifactsHandler;
     use crate::tools::handlers::CodeModeHandler;
     use crate::tools::handlers::DynamicToolHandler;
+    use crate::tools::handlers::EditFileHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::JsReplHandler;
     use crate::tools::handlers::JsReplResetHandler;
     use crate::tools::handlers::ListDirHandler;
+    use crate::tools::handlers::LspHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
     use crate::tools::handlers::MultiAgentHandler;
@@ -1947,6 +2221,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::handlers::ViewImageHandler;
+    use crate::tools::handlers::WriteFileHandler;
     use std::sync::Arc;
 
     let mut builder = ToolRegistryBuilder::new();
@@ -1968,7 +2243,10 @@ pub(crate) fn build_specs(
     let code_mode_handler = Arc::new(CodeModeHandler);
     let js_repl_handler = Arc::new(JsReplHandler);
     let js_repl_reset_handler = Arc::new(JsReplResetHandler);
+    let lsp_handler = Arc::new(LspHandler);
     let artifacts_handler = Arc::new(ArtifactsHandler);
+    let edit_file_handler = Arc::new(EditFileHandler);
+    let write_file_handler = Arc::new(WriteFileHandler);
     let request_permission_enabled = config.request_permission_enabled;
 
     if config.code_mode_enabled {
@@ -2065,6 +2343,13 @@ pub(crate) fn build_specs(
         builder.push_spec_with_parallel_support(create_search_tool_bm25_tool(&app_tools), true);
         builder.register_handler(SEARCH_TOOL_BM25_TOOL_NAME, search_tool_handler);
     }
+
+    builder.push_spec_with_parallel_support(create_lsp_tool(), true);
+    builder.register_handler("lsp", lsp_handler);
+    builder.push_spec(create_write_file_tool());
+    builder.push_spec(create_edit_file_tool());
+    builder.register_handler("write_file", write_file_handler);
+    builder.register_handler("edit_file", edit_file_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -2430,6 +2715,9 @@ mod tests {
             create_write_stdin_tool(),
             PLAN_TOOL.clone(),
             create_request_user_input_tool(CollaborationModesConfig::default()),
+            create_lsp_tool(),
+            create_write_file_tool(),
+            create_edit_file_tool(),
             create_apply_patch_freeform_tool(),
             ToolSpec::WebSearch {
                 external_web_access: Some(true),
@@ -2990,6 +3278,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3008,6 +3299,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3028,6 +3322,9 @@ mod tests {
                 "write_stdin",
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3048,6 +3345,9 @@ mod tests {
                 "write_stdin",
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3066,6 +3366,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3084,6 +3387,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3102,6 +3408,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "web_search",
                 "view_image",
             ],
@@ -3119,6 +3428,9 @@ mod tests {
             &[
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -3139,6 +3451,9 @@ mod tests {
                 "write_stdin",
                 "update_plan",
                 "request_user_input",
+                "lsp",
+                "write_file",
+                "edit_file",
                 "apply_patch",
                 "web_search",
                 "view_image",

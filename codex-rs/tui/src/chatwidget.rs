@@ -598,6 +598,7 @@ pub(crate) struct ChatWidget {
     /// bottom pane is treated as "running" while this is populated, even if no agent turn is
     /// currently executing.
     mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
+    lsp_provider_statuses: Vec<codex_core::LspProviderStatus>,
     connectors_cache: ConnectorsCacheState,
     connectors_partial_snapshot: Option<ConnectorsSnapshot>,
     connectors_prefetch_in_flight: bool,
@@ -1298,6 +1299,7 @@ impl ChatWidget {
         if self.connectors_enabled() {
             self.prefetch_connectors();
         }
+        self.refresh_lsp_provider_status();
         if let Some(user_message) = self.initial_user_message.take() {
             self.submit_user_message(user_message);
         }
@@ -3251,6 +3253,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            lsp_provider_statuses: Vec::new(),
             connectors_cache: ConnectorsCacheState::default(),
             connectors_partial_snapshot: None,
             connectors_prefetch_in_flight: false,
@@ -3435,6 +3438,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            lsp_provider_statuses: Vec::new(),
             connectors_cache: ConnectorsCacheState::default(),
             connectors_partial_snapshot: None,
             connectors_prefetch_in_flight: false,
@@ -3611,6 +3615,7 @@ impl ChatWidget {
             unified_exec_processes: Vec::new(),
             agent_turn_running: false,
             mcp_startup_status: None,
+            lsp_provider_statuses: Vec::new(),
             connectors_cache: ConnectorsCacheState::default(),
             connectors_partial_snapshot: None,
             connectors_prefetch_in_flight: false,
@@ -4412,6 +4417,71 @@ impl ChatWidget {
         );
 
         self.bottom_pane.show_view(Box::new(view));
+    }
+
+    fn refresh_lsp_provider_status(&mut self) {
+        let cwd = self.config.cwd.clone();
+        let codex_home = self.config.codex_home.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let statuses = tokio::task::spawn_blocking(move || {
+                codex_core::probe_lsp_provider_status(cwd.as_path(), None, codex_home.as_path())
+            })
+            .await
+            .unwrap_or_default();
+            app_event_tx.send(AppEvent::LspProviderStatusFetched(statuses));
+        });
+    }
+
+    pub(crate) fn on_lsp_provider_status_fetched(
+        &mut self,
+        statuses: Vec<codex_core::LspProviderStatus>,
+    ) {
+        self.lsp_provider_statuses = statuses;
+        self.maybe_notify_lsp_status();
+    }
+
+    fn maybe_notify_lsp_status(&mut self) {
+        if self.lsp_provider_statuses.is_empty() {
+            return;
+        }
+
+        let ready: Vec<String> = self
+            .lsp_provider_statuses
+            .iter()
+            .filter(|provider| provider.status == "ready")
+            .map(|provider| provider.id.clone())
+            .collect();
+        let unhealthy: Vec<String> = self
+            .lsp_provider_statuses
+            .iter()
+            .filter(|provider| provider.status == "failed")
+            .map(|provider| provider.id.clone())
+            .collect();
+        let unavailable: Vec<String> = self
+            .lsp_provider_statuses
+            .iter()
+            .filter(|provider| provider.status == "unavailable")
+            .map(|provider| provider.id.clone())
+            .collect();
+
+        let mut parts = Vec::new();
+        if !ready.is_empty() {
+            parts.push(format!("ready: {}", ready.join(", ")));
+        }
+        if !unhealthy.is_empty() {
+            parts.push(format!("failed: {}", unhealthy.join(", ")));
+        }
+        if !unavailable.is_empty() {
+            parts.push(format!("unavailable: {}", unavailable.join(", ")));
+        }
+        if parts.is_empty() {
+            return;
+        }
+
+        self.notify(Notification::LspStatus {
+            summary: format!("LSP {}", parts.join("; ")),
+        });
     }
 
     pub(crate) fn handle_paste(&mut self, text: String) {
@@ -5288,6 +5358,14 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
+        let lsp_providers = if self.lsp_provider_statuses.is_empty() {
+            codex_core::list_lsp_provider_status(
+                self.config.cwd.as_path(),
+                self.config.codex_home.as_path(),
+            )
+        } else {
+            self.lsp_provider_statuses.clone()
+        };
         self.add_to_history(crate::status::new_status_output_with_rate_limits(
             &self.config,
             self.auth_manager.as_ref(),
@@ -5302,6 +5380,7 @@ impl ChatWidget {
             self.model_display_name(),
             collaboration_mode,
             reasoning_effort_override,
+            lsp_providers,
         ));
     }
 
@@ -8750,6 +8829,9 @@ enum Notification {
     AgentTurnComplete {
         response: String,
     },
+    LspStatus {
+        summary: String,
+    },
     ExecApprovalRequested {
         command: String,
     },
@@ -8776,6 +8858,7 @@ impl Notification {
                 Notification::agent_turn_preview(response)
                     .unwrap_or_else(|| "Agent turn complete".to_string())
             }
+            Notification::LspStatus { summary } => summary.clone(),
             Notification::ExecApprovalRequested { command } => {
                 format!("Approval requested: {}", truncate_text(command, 30))
             }
@@ -8810,6 +8893,7 @@ impl Notification {
     fn type_name(&self) -> &str {
         match self {
             Notification::AgentTurnComplete { .. } => "agent-turn-complete",
+            Notification::LspStatus { .. } => "lsp-status",
             Notification::ExecApprovalRequested { .. }
             | Notification::EditApprovalRequested { .. }
             | Notification::ElicitationRequested { .. } => "approval-requested",
@@ -8821,6 +8905,7 @@ impl Notification {
     fn priority(&self) -> u8 {
         match self {
             Notification::AgentTurnComplete { .. } => 0,
+            Notification::LspStatus { .. } => 0,
             Notification::ExecApprovalRequested { .. }
             | Notification::EditApprovalRequested { .. }
             | Notification::ElicitationRequested { .. }

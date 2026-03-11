@@ -1848,6 +1848,7 @@ async fn make_chatwidget_manual(
         unified_exec_processes: Vec::new(),
         agent_turn_running: false,
         mcp_startup_status: None,
+        lsp_provider_statuses: Vec::new(),
         connectors_cache: ConnectorsCacheState::default(),
         connectors_partial_snapshot: None,
         connectors_prefetch_in_flight: false,
