@@ -1725,17 +1725,114 @@ pub struct CollaborationModeMask {
     #[serde(rename = "reasoning_effort")]
     #[ts(rename = "reasoning_effort")]
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    /// Short summary of the built-in behavior for this preset.
+    pub description: String,
+    /// Whether this preset is surfaced by the built-in TUI collaboration-mode picker.
+    pub tui_visible: bool,
+    /// Whether this preset allows mutating repo-tracked files.
+    pub allows_repo_mutation: bool,
+    /// Whether the `update_plan` tool is available for this preset.
+    pub update_plan_available: bool,
+    /// Whether this preset expects the final plan output to use a `<proposed_plan>` block.
+    pub requires_proposed_plan_block: bool,
+    /// Whether `request_user_input` is available for this preset.
+    pub request_user_input_available: bool,
+    /// Whether this preset may stream proposed-plan deltas/items to clients.
+    pub streams_proposed_plan: bool,
 }
 
 impl From<CoreCollaborationModeMask> for CollaborationModeMask {
     fn from(value: CoreCollaborationModeMask) -> Self {
+        let request_user_input_available = collaboration_mode_request_user_input_available(
+            value.mode,
+            value
+                .developer_instructions
+                .as_ref()
+                .and_then(Option::as_deref),
+        );
         Self {
+            description: collaboration_mode_description(value.mode, &value.name),
+            tui_visible: collaboration_mode_tui_visible(value.mode),
+            allows_repo_mutation: collaboration_mode_allows_repo_mutation(value.mode),
+            update_plan_available: collaboration_mode_update_plan_available(value.mode),
+            requires_proposed_plan_block: collaboration_mode_requires_proposed_plan_block(
+                value.mode,
+            ),
             name: value.name,
             mode: value.mode,
             model: value.model,
             reasoning_effort: value.reasoning_effort,
+            request_user_input_available,
+            streams_proposed_plan: collaboration_mode_streams_proposed_plan(value.mode),
         }
     }
+}
+
+fn collaboration_mode_description(mode: Option<ModeKind>, name: &str) -> String {
+    match mode {
+        Some(ModeKind::Default) => {
+            "Execute the task directly with reasonable assumptions and concise progress updates."
+                .to_string()
+        }
+        Some(ModeKind::Plan) => {
+            "Explore and refine a decision-complete plan first, and avoid mutating repository state."
+                .to_string()
+        }
+        Some(ModeKind::PairProgramming) => {
+            "Collaborate interactively on the task while keeping the user closely involved in implementation decisions."
+                .to_string()
+        }
+        Some(ModeKind::Execute) => {
+            "Carry the task through with minimal back-and-forth, optimizing for autonomous completion."
+                .to_string()
+        }
+        None => format!("Apply the built-in behavior for the {name} collaboration preset."),
+    }
+}
+
+fn collaboration_mode_request_user_input_available(
+    mode: Option<ModeKind>,
+    developer_instructions: Option<&str>,
+) -> bool {
+    const DEFAULT_MODE_REQUEST_USER_INPUT_AVAILABLE: &str =
+        "The `request_user_input` tool is available in Default mode.";
+    const DEFAULT_MODE_REQUEST_USER_INPUT_UNAVAILABLE: &str =
+        "The `request_user_input` tool is unavailable in Default mode.";
+
+    match mode {
+        Some(mode) if mode != ModeKind::Default => mode.allows_request_user_input(),
+        _ => developer_instructions
+            .and_then(|instructions| {
+                if instructions.contains(DEFAULT_MODE_REQUEST_USER_INPUT_AVAILABLE) {
+                    Some(true)
+                } else if instructions.contains(DEFAULT_MODE_REQUEST_USER_INPUT_UNAVAILABLE) {
+                    Some(false)
+                } else {
+                    mode.map(ModeKind::allows_request_user_input)
+                }
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn collaboration_mode_allows_repo_mutation(mode: Option<ModeKind>) -> bool {
+    !matches!(mode, Some(ModeKind::Plan))
+}
+
+fn collaboration_mode_tui_visible(mode: Option<ModeKind>) -> bool {
+    mode.is_none_or(ModeKind::is_tui_visible)
+}
+
+fn collaboration_mode_update_plan_available(mode: Option<ModeKind>) -> bool {
+    !matches!(mode, Some(ModeKind::Plan))
+}
+
+fn collaboration_mode_requires_proposed_plan_block(mode: Option<ModeKind>) -> bool {
+    matches!(mode, Some(ModeKind::Plan))
+}
+
+fn collaboration_mode_streams_proposed_plan(mode: Option<ModeKind>) -> bool {
+    matches!(mode, Some(ModeKind::Plan))
 }
 
 /// EXPERIMENTAL - collaboration mode presets response.
@@ -6634,5 +6731,64 @@ mod tests {
         let serialized_without_override =
             serde_json::to_value(&without_override).expect("params should serialize");
         assert_eq!(serialized_without_override.get("serviceTier"), None);
+    }
+
+    #[test]
+    fn collaboration_mode_mask_conversion_includes_behavior_metadata() {
+        use codex_protocol::config_types::CollaborationModeMask as CoreCollaborationModeMask;
+
+        let plan = CollaborationModeMask::from(CoreCollaborationModeMask {
+            name: "Plan".to_string(),
+            mode: Some(ModeKind::Plan),
+            model: None,
+            reasoning_effort: Some(Some(ReasoningEffort::Medium)),
+            developer_instructions: Some(Some("plan".to_string())),
+        });
+        assert_eq!(
+            plan,
+            CollaborationModeMask {
+                name: "Plan".to_string(),
+                mode: Some(ModeKind::Plan),
+                model: None,
+                reasoning_effort: Some(Some(ReasoningEffort::Medium)),
+                description:
+                    "Explore and refine a decision-complete plan first, and avoid mutating repository state."
+                        .to_string(),
+                tui_visible: true,
+                allows_repo_mutation: false,
+                update_plan_available: false,
+                requires_proposed_plan_block: true,
+                request_user_input_available: true,
+                streams_proposed_plan: true,
+            }
+        );
+
+        let default = CollaborationModeMask::from(CoreCollaborationModeMask {
+            name: "Default".to_string(),
+            mode: Some(ModeKind::Default),
+            model: None,
+            reasoning_effort: None,
+            developer_instructions: Some(Some(
+                "The `request_user_input` tool is available in Default mode.".to_string(),
+            )),
+        });
+        assert_eq!(
+            default,
+            CollaborationModeMask {
+                name: "Default".to_string(),
+                mode: Some(ModeKind::Default),
+                model: None,
+                reasoning_effort: None,
+                description:
+                    "Execute the task directly with reasonable assumptions and concise progress updates."
+                        .to_string(),
+                tui_visible: true,
+                allows_repo_mutation: true,
+                update_plan_available: true,
+                requires_proposed_plan_block: false,
+                request_user_input_available: true,
+                streams_proposed_plan: false,
+            }
+        );
     }
 }

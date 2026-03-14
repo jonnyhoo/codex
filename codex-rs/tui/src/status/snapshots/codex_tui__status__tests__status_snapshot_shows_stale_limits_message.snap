@@ -5,7 +5,7 @@ expression: sanitized
 /status
 
 ╭───────────────────────────────────────────────────────────────────────╮
-│  >_ OpenAI Codex (v0.0.0)                                             │
+│  >_ OpenAI Codex (v0.3.0)                                             │
 │                                                                       │
 │ Visit https://chatgpt.com/codex/settings/usage for up-to-date         │
 │ information on rate limits and credits                                │
@@ -14,6 +14,7 @@ expression: sanitized
 │  Directory: [[workspace]]                                             │
 │  Permissions:      Custom (read-only, on-request)                     │
 │  Agents.md:        <none>                                             │
+│  LSP:              disabled                                           │
 │                                                                       │
 │  Token usage:      1.9K total  (1K input + 900 output)                │
 │  Context window:   100% left (2.25K used / 272K)                      │

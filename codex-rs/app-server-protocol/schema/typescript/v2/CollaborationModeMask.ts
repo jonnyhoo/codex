@@ -7,4 +7,32 @@ import type { ReasoningEffort } from "../ReasoningEffort";
 /**
  * EXPERIMENTAL - collaboration mode preset metadata for clients.
  */
-export type CollaborationModeMask = { name: string, mode: ModeKind | null, model: string | null, reasoning_effort: ReasoningEffort | null | null, };
+export type CollaborationModeMask = { name: string, mode: ModeKind | null, model: string | null, reasoning_effort: ReasoningEffort | null | null, 
+/**
+ * Short summary of the built-in behavior for this preset.
+ */
+description: string, 
+/**
+ * Whether this preset is surfaced by the built-in TUI collaboration-mode picker.
+ */
+tuiVisible: boolean, 
+/**
+ * Whether this preset allows mutating repo-tracked files.
+ */
+allowsRepoMutation: boolean, 
+/**
+ * Whether the `update_plan` tool is available for this preset.
+ */
+updatePlanAvailable: boolean, 
+/**
+ * Whether this preset expects the final plan output to use a `<proposed_plan>` block.
+ */
+requiresProposedPlanBlock: boolean, 
+/**
+ * Whether `request_user_input` is available for this preset.
+ */
+requestUserInputAvailable: boolean, 
+/**
+ * Whether this preset may stream proposed-plan deltas/items to clients.
+ */
+streamsProposedPlan: boolean, };

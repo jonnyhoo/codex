@@ -2824,6 +2824,139 @@ pub(crate) async fn make_session_and_context_with_rx() -> (
 }
 
 #[tokio::test]
+async fn turn_context_runtime_context_mirrors_turn_state() {
+    let (session, turn_context) = make_session_and_context().await;
+
+    let runtime = turn_context.runtime_context(session.conversation_id);
+
+    assert_eq!(runtime.session_id, session.conversation_id);
+    assert_eq!(runtime.turn_id, turn_context.sub_id);
+    assert_eq!(runtime.trace_id, turn_context.trace_id);
+    assert_eq!(runtime.session_source, turn_context.session_source);
+    assert_eq!(runtime.cwd, turn_context.cwd);
+    assert_eq!(runtime.current_date, turn_context.current_date);
+    assert_eq!(runtime.timezone, turn_context.timezone);
+    assert_eq!(
+        runtime.app_server_client_name,
+        turn_context.app_server_client_name
+    );
+    assert_eq!(runtime.model.slug, turn_context.model_info.slug);
+    assert_eq!(runtime.model.provider, turn_context.provider);
+    assert_eq!(
+        runtime.model.reasoning_effort,
+        turn_context.reasoning_effort
+    );
+    assert_eq!(
+        runtime.model.reasoning_summary,
+        turn_context.reasoning_summary
+    );
+    assert_eq!(runtime.model.personality, turn_context.personality);
+    assert_eq!(
+        runtime.instructions.developer_instructions,
+        turn_context.developer_instructions
+    );
+    assert_eq!(
+        runtime.instructions.user_instructions,
+        turn_context.user_instructions
+    );
+    assert_eq!(
+        runtime.instructions.compact_prompt,
+        turn_context.compact_prompt
+    );
+    assert_eq!(
+        runtime.collaboration.mode_kind,
+        turn_context.collaboration_mode.mode
+    );
+    assert_eq!(
+        runtime.collaboration.collaboration_mode,
+        turn_context.collaboration_mode
+    );
+    assert_eq!(
+        runtime.collaboration.realtime_active,
+        turn_context.realtime_active
+    );
+    assert_eq!(
+        runtime.execution.approval_policy,
+        turn_context.approval_policy
+    );
+    assert_eq!(
+        runtime.execution.sandbox_policy,
+        turn_context.sandbox_policy
+    );
+    assert_eq!(
+        runtime.execution.shell_environment_policy,
+        turn_context.shell_environment_policy
+    );
+    assert_eq!(
+        runtime.execution.windows_sandbox_level,
+        turn_context.windows_sandbox_level
+    );
+    assert_eq!(
+        runtime.execution.final_output_json_schema,
+        turn_context.final_output_json_schema
+    );
+    assert_eq!(
+        runtime.execution.truncation_policy,
+        turn_context.truncation_policy
+    );
+    assert_eq!(runtime.tools.tools_config, turn_context.tools_config);
+}
+
+#[tokio::test]
+async fn tool_invocation_runtime_context_uses_session_and_turn() {
+    let (session, turn_context) = make_session_and_context().await;
+    let invocation = ToolInvocation {
+        session: Arc::new(session),
+        turn: Arc::new(turn_context),
+        tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+        call_id: "call-1".to_string(),
+        tool_name: "request_user_input".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+    };
+
+    let runtime = invocation.runtime_context();
+
+    assert_eq!(runtime.session_id, invocation.session.conversation_id);
+    assert_eq!(runtime.turn_id, invocation.turn.sub_id);
+    assert_eq!(
+        runtime.collaboration.mode_kind,
+        invocation.turn.collaboration_mode.mode
+    );
+}
+
+#[tokio::test]
+async fn resolve_instruction_layers_preserves_base_and_user_sections() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.developer_instructions = Some("developer override".to_string());
+    turn_context.user_instructions = Some("repo instructions".to_string());
+
+    let resolved = session.resolve_instruction_layers(&turn_context).await;
+
+    assert_eq!(
+        resolved.base_instructions,
+        session.get_base_instructions().await.text
+    );
+    assert!(
+        resolved
+            .developer_sections
+            .iter()
+            .any(|section| section.contains("developer override")),
+        "expected developer override in resolved developer sections: {:?}",
+        resolved.developer_sections
+    );
+    assert!(
+        resolved
+            .contextual_user_sections
+            .iter()
+            .any(|section| section.contains("repo instructions")),
+        "expected repo/user instructions in contextual user sections: {:?}",
+        resolved.contextual_user_sections
+    );
+}
+
+#[tokio::test]
 async fn refresh_mcp_servers_is_deferred_until_next_turn() {
     let (session, turn_context) = make_session_and_context().await;
     let old_token = session.mcp_startup_cancellation_token().await;

@@ -42,6 +42,12 @@ result envelope internally. That is intentional: the in-process path is
 meant to preserve app-server semantics while removing the process
 boundary, not to introduce a second response contract.
 
+This facade also exposes typed convenience helpers for selected RPCs.
+For example, `list_collaboration_modes(...)` returns the structured
+`collaborationMode/list` response, including client-facing mode metadata
+such as `description`, `tuiVisible`, `updatePlanAvailable`,
+`requestUserInputAvailable`, and `streamsProposedPlan`.
+
 ## Bootstrap behavior
 
 The client facade starts an already-initialized in-process runtime, but

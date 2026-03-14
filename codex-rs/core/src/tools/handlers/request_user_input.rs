@@ -64,6 +64,7 @@ impl ToolHandler for RequestUserInputHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
+        let runtime_context = invocation.runtime_context();
         let ToolInvocation {
             session,
             turn,
@@ -81,7 +82,7 @@ impl ToolHandler for RequestUserInputHandler {
             }
         };
 
-        let mode = session.collaboration_mode().await.mode;
+        let mode = runtime_context.collaboration.mode_kind;
         if let Some(message) =
             request_user_input_unavailable_message(mode, self.default_mode_request_user_input)
         {

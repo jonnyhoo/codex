@@ -159,7 +159,52 @@ async fn status_snapshot_includes_reasoning_details() {
         captured_at,
         &model_slug,
         None,
+        None,
         reasoning_effort_override,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(80));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
+        }
+    }
+    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    assert_snapshot!(sanitized);
+}
+
+#[tokio::test]
+async fn status_snapshot_includes_collaboration_mode_summary() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.model_provider_id = "openai".to_string();
+    config.cwd = PathBuf::from("/workspace/tests");
+
+    let auth_manager = test_auth_manager(&config);
+    let usage = TokenUsage::default();
+    let captured_at = chrono::Local
+        .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+        .single()
+        .expect("timestamp");
+    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+
+    let composite = new_status_output(
+        &config,
+        &auth_manager,
+        None,
+        &usage,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        captured_at,
+        &model_slug,
+        Some("Design Review"),
+        Some(
+            "repo edits blocked · `update_plan` unavailable · `request_user_input` available · streams proposed plan",
+        ),
+        None,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(80));
     if cfg!(windows) {
@@ -215,6 +260,7 @@ async fn status_permissions_non_default_workspace_write_is_custom() {
         None,
         captured_at,
         &model_slug,
+        None,
         None,
         None,
     );
@@ -279,6 +325,7 @@ async fn status_snapshot_includes_forked_from() {
         &model_slug,
         None,
         None,
+        None,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(80));
     if cfg!(windows) {
@@ -341,6 +388,7 @@ async fn status_snapshot_includes_monthly_limit() {
         &model_slug,
         None,
         None,
+        None,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(80));
     if cfg!(windows) {
@@ -389,6 +437,7 @@ async fn status_snapshot_shows_unlimited_credits() {
         None,
         captured_at,
         &model_slug,
+        None,
         None,
         None,
     );
@@ -440,6 +489,7 @@ async fn status_snapshot_shows_positive_credits() {
         &model_slug,
         None,
         None,
+        None,
     );
     let rendered = render_lines(&composite.display_lines(120));
     assert!(
@@ -489,6 +539,7 @@ async fn status_snapshot_hides_zero_credits() {
         &model_slug,
         None,
         None,
+        None,
     );
     let rendered = render_lines(&composite.display_lines(120));
     assert!(
@@ -536,6 +587,7 @@ async fn status_snapshot_hides_when_has_no_credits_flag() {
         &model_slug,
         None,
         None,
+        None,
     );
     let rendered = render_lines(&composite.display_lines(120));
     assert!(
@@ -579,6 +631,7 @@ async fn status_card_token_usage_excludes_cached_tokens() {
         None,
         now,
         &model_slug,
+        None,
         None,
         None,
     );
@@ -642,6 +695,7 @@ async fn status_snapshot_truncates_in_narrow_terminal() {
         captured_at,
         &model_slug,
         None,
+        None,
         reasoning_effort_override,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(70));
@@ -690,6 +744,7 @@ async fn status_snapshot_shows_missing_limits_message() {
         None,
         now,
         &model_slug,
+        None,
         None,
         None,
     );
@@ -761,6 +816,7 @@ async fn status_snapshot_includes_credits_and_limits() {
         &model_slug,
         None,
         None,
+        None,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(80));
     if cfg!(windows) {
@@ -816,6 +872,7 @@ async fn status_snapshot_shows_empty_limits_message() {
         None,
         captured_at,
         &model_slug,
+        None,
         None,
         None,
     );
@@ -882,6 +939,7 @@ async fn status_snapshot_shows_stale_limits_message() {
         None,
         now,
         &model_slug,
+        None,
         None,
         None,
     );
@@ -954,6 +1012,7 @@ async fn status_snapshot_cached_limits_hide_credits_without_flag() {
         &model_slug,
         None,
         None,
+        None,
     );
     let mut rendered_lines = render_lines(&composite.display_lines(80));
     if cfg!(windows) {
@@ -1010,6 +1069,7 @@ async fn status_context_window_uses_last_usage() {
         None,
         now,
         &model_slug,
+        None,
         None,
         None,
     );

@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/tests.rs
+expression: popup
+---
+  Select Collaboration Mode
+  Pick a collaboration preset. The selected row shows runtime capabilities.
+
+  1. Plan               repo edits blocked · `update_plan` unavailable · `request_user_input`
+                        available · streams proposed plan
+› 2. Default (current)  Execute the task directly with reasonable assumptions and concise progress
+                        updates. repo edits allowed · `update_plan` available ·
+                        `request_user_input` unavailable
+
+  Press enter to confirm or esc to go back

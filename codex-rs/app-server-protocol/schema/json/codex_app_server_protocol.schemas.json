@@ -9650,6 +9650,14 @@
       "CollaborationModeMask": {
         "description": "EXPERIMENTAL - collaboration mode preset metadata for clients.",
         "properties": {
+          "allowsRepoMutation": {
+            "description": "Whether this preset allows mutating repo-tracked files.",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "Short summary of the built-in behavior for this preset.",
+            "type": "string"
+          },
           "mode": {
             "anyOf": [
               {
@@ -9685,10 +9693,37 @@
                 "type": "null"
               }
             ]
+          },
+          "requestUserInputAvailable": {
+            "description": "Whether `request_user_input` is available for this preset.",
+            "type": "boolean"
+          },
+          "requiresProposedPlanBlock": {
+            "description": "Whether this preset expects the final plan output to use a `<proposed_plan>` block.",
+            "type": "boolean"
+          },
+          "streamsProposedPlan": {
+            "description": "Whether this preset may stream proposed-plan deltas/items to clients.",
+            "type": "boolean"
+          },
+          "tuiVisible": {
+            "description": "Whether this preset is surfaced by the built-in TUI collaboration-mode picker.",
+            "type": "boolean"
+          },
+          "updatePlanAvailable": {
+            "description": "Whether the `update_plan` tool is available for this preset.",
+            "type": "boolean"
           }
         },
         "required": [
-          "name"
+          "allowsRepoMutation",
+          "description",
+          "name",
+          "requestUserInputAvailable",
+          "requiresProposedPlanBlock",
+          "streamsProposedPlan",
+          "tuiVisible",
+          "updatePlanAvailable"
         ],
         "type": "object"
       },

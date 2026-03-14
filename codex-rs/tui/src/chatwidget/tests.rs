@@ -2864,6 +2864,40 @@ async fn submit_user_message_with_mode_allows_same_mode_during_running_turn() {
 }
 
 #[tokio::test]
+async fn submit_user_message_with_mode_allows_same_preset_identity_with_plan_override() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::High));
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask.clone());
+    chat.on_task_started();
+
+    let mut submit_mask = plan_mask;
+    submit_mask.reasoning_effort = Some(Some(ReasoningEffortConfig::Medium));
+    chat.submit_user_message_with_mode("Continue planning.".to_string(), submit_mask);
+
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
+    assert!(chat.queued_user_messages.is_empty());
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            collaboration_mode:
+                Some(CollaborationMode {
+                    mode: ModeKind::Plan,
+                    ..
+                }),
+            personality: None,
+            ..
+        } => {}
+        other => {
+            panic!("expected Op::UserTurn with plan collab mode, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
 async fn submit_user_message_with_mode_submits_when_plan_stream_is_not_active() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.thread_id = Some(ThreadId::new());
@@ -5375,6 +5409,67 @@ async fn mode_switch_surfaces_model_change_notification_when_effective_model_cha
 }
 
 #[tokio::test]
+async fn collaboration_mode_label_uses_active_preset_name() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let mut plan_mask = collaboration_modes::plan_mask(chat.models_manager.as_ref())
+        .expect("expected plan collaboration mode");
+    plan_mask.name = "Design Review".to_string();
+    chat.set_collaboration_mask(plan_mask);
+
+    assert_eq!(
+        chat.collaboration_mode_label().as_deref(),
+        Some("Design Review")
+    );
+}
+
+#[tokio::test]
+async fn mode_switch_notification_uses_active_preset_name() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let mut plan_mask = collaboration_modes::plan_mask(chat.models_manager.as_ref())
+        .expect("expected plan collaboration mode");
+    plan_mask.name = "Design Review".to_string();
+    plan_mask.model = Some("gpt-5.1-codex-mini".to_string());
+    chat.set_collaboration_mask(plan_mask);
+
+    let plan_messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        plan_messages
+            .contains("Model changed to gpt-5.1-codex-mini medium for Design Review mode."),
+        "expected preset-aware model switch notice, got: {plan_messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn preset_switch_notification_triggers_for_same_mode_variant() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    let mut default_variant = collaboration_modes::default_mask(chat.models_manager.as_ref())
+        .expect("expected default collaboration mode");
+    default_variant.name = "Default Fast".to_string();
+    default_variant.model = Some("gpt-5.1-codex-mini".to_string());
+    chat.set_collaboration_mask(default_variant);
+
+    let messages = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("Model changed to gpt-5.1-codex-mini default for Default Fast mode."),
+        "expected same-mode preset switch notice, got: {messages:?}"
+    );
+}
+
+#[tokio::test]
 async fn mode_switch_surfaces_reasoning_change_notification_when_model_stays_same() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, true);
@@ -5450,6 +5545,18 @@ async fn collab_slash_command_opens_picker_and_updates_mode() {
             panic!("expected Op::UserTurn with code collab mode, got {other:?}")
         }
     }
+}
+
+#[tokio::test]
+async fn collaboration_mode_picker_snapshot_includes_runtime_metadata() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    chat.open_collaboration_modes_popup();
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert_snapshot!("collaboration_mode_picker_with_metadata", popup);
 }
 
 #[tokio::test]

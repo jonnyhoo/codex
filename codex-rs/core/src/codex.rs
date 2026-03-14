@@ -193,6 +193,13 @@ pub(crate) struct PreviousTurnSettings {
     pub(crate) realtime_active: Option<bool>,
 }
 
+use crate::ResolvedInstructionLayers;
+use crate::RuntimeCollaborationContext;
+use crate::RuntimeContext;
+use crate::RuntimeExecutionContext;
+use crate::RuntimeInstructionContext;
+use crate::RuntimeModelContext;
+use crate::RuntimeToolsContext;
 use crate::exec_policy::ExecPolicyUpdateError;
 use crate::feedback_tags;
 use crate::file_watcher::FileWatcher;
@@ -731,6 +738,48 @@ pub(crate) struct TurnContext {
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
 }
 impl TurnContext {
+    pub(crate) fn runtime_context(&self, session_id: ThreadId) -> RuntimeContext {
+        RuntimeContext {
+            session_id,
+            turn_id: self.sub_id.clone(),
+            trace_id: self.trace_id.clone(),
+            session_source: self.session_source.clone(),
+            cwd: self.cwd.clone(),
+            current_date: self.current_date.clone(),
+            timezone: self.timezone.clone(),
+            app_server_client_name: self.app_server_client_name.clone(),
+            model: RuntimeModelContext {
+                slug: self.model_info.slug.clone(),
+                provider: self.provider.clone(),
+                reasoning_effort: self.reasoning_effort,
+                reasoning_summary: self.reasoning_summary,
+                personality: self.personality,
+            },
+            instructions: RuntimeInstructionContext {
+                developer_instructions: self.developer_instructions.clone(),
+                user_instructions: self.user_instructions.clone(),
+                compact_prompt: self.compact_prompt.clone(),
+            },
+            collaboration: RuntimeCollaborationContext {
+                mode_kind: self.collaboration_mode.mode,
+                collaboration_mode: self.collaboration_mode.clone(),
+                realtime_active: self.realtime_active,
+            },
+            execution: RuntimeExecutionContext {
+                approval_policy: self.approval_policy.clone(),
+                sandbox_policy: self.sandbox_policy.clone(),
+                shell_environment_policy: self.shell_environment_policy.clone(),
+                windows_sandbox_level: self.windows_sandbox_level,
+                network: self.turn_context_network_item(),
+                final_output_json_schema: self.final_output_json_schema.clone(),
+                truncation_policy: self.truncation_policy,
+            },
+            tools: RuntimeToolsContext {
+                tools_config: self.tools_config.clone(),
+            },
+        }
+    }
+
     pub(crate) fn model_context_window(&self) -> Option<i64> {
         let effective_context_window_percent = self.model_info.effective_context_window_percent;
         self.model_info.context_window.map(|context_window| {
@@ -3342,11 +3391,6 @@ impl Session {
         self.features.clone()
     }
 
-    pub(crate) async fn collaboration_mode(&self) -> CollaborationMode {
-        let state = self.state.lock().await;
-        state.session_configuration.collaboration_mode.clone()
-    }
-
     async fn send_raw_response_items(&self, turn_context: &TurnContext, items: &[ResponseItem]) {
         for item in items {
             self.send_event(
@@ -3361,6 +3405,30 @@ impl Session {
         &self,
         turn_context: &TurnContext,
     ) -> Vec<ResponseItem> {
+        let resolved_layers = self.resolve_instruction_layers(turn_context).await;
+
+        let mut items = Vec::with_capacity(2);
+        if let Some(developer_message) =
+            crate::context_manager::updates::build_developer_update_item(
+                resolved_layers.developer_sections,
+            )
+        {
+            items.push(developer_message);
+        }
+        if let Some(contextual_user_message) =
+            crate::context_manager::updates::build_contextual_user_message(
+                resolved_layers.contextual_user_sections,
+            )
+        {
+            items.push(contextual_user_message);
+        }
+        items
+    }
+
+    pub(crate) async fn resolve_instruction_layers(
+        &self,
+        turn_context: &TurnContext,
+    ) -> ResolvedInstructionLayers {
         let mut developer_sections = Vec::<String>::with_capacity(8);
         let mut contextual_user_sections = Vec::<String>::with_capacity(2);
         let shell = self.user_shell();
@@ -3394,7 +3462,6 @@ impl Session {
         if let Some(developer_instructions) = turn_context.developer_instructions.as_deref() {
             developer_sections.push(developer_instructions.to_string());
         }
-        // Add developer instructions for memories.
         if turn_context.features.enabled(Feature::MemoryTool)
             && turn_context.config.memories.use_memories
             && let Some(memory_prompt) =
@@ -3402,7 +3469,6 @@ impl Session {
         {
             developer_sections.push(memory_prompt);
         }
-        // Add developer instructions from collaboration_mode if they exist and are non-empty
         if let Some(collab_instructions) =
             DeveloperInstructions::from_collaboration_mode(&collaboration_mode)
         {
@@ -3464,18 +3530,11 @@ impl Session {
                 .serialize_to_xml(),
         );
 
-        let mut items = Vec::with_capacity(2);
-        if let Some(developer_message) =
-            crate::context_manager::updates::build_developer_update_item(developer_sections)
-        {
-            items.push(developer_message);
+        ResolvedInstructionLayers {
+            base_instructions,
+            developer_sections,
+            contextual_user_sections,
         }
-        if let Some(contextual_user_message) =
-            crate::context_manager::updates::build_contextual_user_message(contextual_user_sections)
-        {
-            items.push(contextual_user_message);
-        }
-        items
     }
 
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {

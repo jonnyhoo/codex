@@ -46,12 +46,7 @@ async fn list_collaboration_modes_returns_presets() -> Result<()> {
 
     let expected: Vec<CollaborationModeMask> = builtin_collaboration_mode_presets()
         .into_iter()
-        .map(|preset| CollaborationModeMask {
-            name: preset.name,
-            mode: preset.mode,
-            model: preset.model,
-            reasoning_effort: preset.reasoning_effort,
-        })
+        .map(Into::into)
         .collect();
     assert_eq!(expected, items);
     Ok(())

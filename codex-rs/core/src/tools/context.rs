@@ -1,3 +1,4 @@
+use crate::RuntimeContext;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::tools::TELEMETRY_PREVIEW_MAX_BYTES;
@@ -39,6 +40,12 @@ pub struct ToolInvocation {
     pub call_id: String,
     pub tool_name: String,
     pub payload: ToolPayload,
+}
+
+impl ToolInvocation {
+    pub fn runtime_context(&self) -> RuntimeContext {
+        self.turn.runtime_context(self.session.conversation_id)
+    }
 }
 
 #[derive(Clone, Debug)]

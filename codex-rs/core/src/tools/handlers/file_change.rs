@@ -233,16 +233,16 @@ pub(crate) fn make_write_action(
         codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(err) => {
             Err(FunctionCallError::RespondToModel(err.to_string()))
         }
-        codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(err) => Err(
-            FunctionCallError::RespondToModel(format!(
+        codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(err) => {
+            Err(FunctionCallError::RespondToModel(format!(
                 "failed to parse generated apply_patch payload: {err:?}"
-            )),
-        ),
-        codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => Err(
-            FunctionCallError::RespondToModel(
+            )))
+        }
+        codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
+            Err(FunctionCallError::RespondToModel(
                 "generated payload did not parse as apply_patch".to_string(),
-            ),
-        ),
+            ))
+        }
     }
 }
 

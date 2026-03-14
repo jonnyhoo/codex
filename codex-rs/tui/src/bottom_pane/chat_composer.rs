@@ -4216,7 +4216,7 @@ impl ChatComposer {
                 let left_mode_indicator = if status_line_active {
                     None
                 } else {
-                    self.collaboration_mode_indicator
+                    self.collaboration_mode_indicator.as_ref()
                 };
                 let mut left_width = if self.footer_flash_visible() {
                     self.footer_flash
@@ -4240,9 +4240,12 @@ impl ChatComposer {
                     )
                 };
                 let right_line = if status_line_active {
-                    let full =
-                        mode_indicator_line(self.collaboration_mode_indicator, show_cycle_hint);
-                    let compact = mode_indicator_line(self.collaboration_mode_indicator, false);
+                    let full = mode_indicator_line(
+                        self.collaboration_mode_indicator.as_ref(),
+                        show_cycle_hint,
+                    );
+                    let compact =
+                        mode_indicator_line(self.collaboration_mode_indicator.as_ref(), false);
                     let full_width = full.as_ref().map(|l| l.width() as u16).unwrap_or(0);
                     if can_show_left_with_context(hint_rect, left_width, full_width) {
                         full
@@ -4356,7 +4359,7 @@ impl ChatComposer {
                         hint_rect,
                         buf,
                         &footer_props,
-                        self.collaboration_mode_indicator,
+                        self.collaboration_mode_indicator.as_ref(),
                         show_cycle_hint,
                         show_shortcuts_hint,
                         show_queue_hint,
@@ -4770,7 +4773,7 @@ mod tests {
             120,
             true,
             |composer| {
-                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan(None)));
             },
         );
         snapshot_composer_state_with_width(
@@ -4778,7 +4781,7 @@ mod tests {
             60,
             true,
             |composer| {
-                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan(None)));
             },
         );
         snapshot_composer_state_with_width(
@@ -4786,7 +4789,7 @@ mod tests {
             44,
             true,
             |composer| {
-                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan(None)));
             },
         );
         snapshot_composer_state_with_width(
@@ -4794,7 +4797,7 @@ mod tests {
             26,
             true,
             |composer| {
-                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 100, Some(CollaborationModeIndicator::Plan(None)));
             },
         );
 
@@ -4851,7 +4854,7 @@ mod tests {
             120,
             true,
             |composer| {
-                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan(None)));
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4861,7 +4864,7 @@ mod tests {
             50,
             true,
             |composer| {
-                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan(None)));
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4871,7 +4874,7 @@ mod tests {
             40,
             true,
             |composer| {
-                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan(None)));
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4881,7 +4884,7 @@ mod tests {
             30,
             true,
             |composer| {
-                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan(None)));
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },
@@ -4891,7 +4894,7 @@ mod tests {
             20,
             true,
             |composer| {
-                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan));
+                setup_collab_footer(composer, 98, Some(CollaborationModeIndicator::Plan(None)));
                 composer.set_task_running(true);
                 composer.set_text_content("Test".to_string(), Vec::new(), Vec::new());
             },

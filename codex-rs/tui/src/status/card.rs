@@ -68,6 +68,7 @@ struct StatusHistoryCell {
     permissions: String,
     agents_summary: String,
     collaboration_mode: Option<String>,
+    collaboration_mode_summary: Option<String>,
     model_provider: Option<String>,
     account: Option<StatusAccountDisplay>,
     thread_name: Option<String>,
@@ -93,6 +94,7 @@ pub(crate) fn new_status_output(
     now: DateTime<Local>,
     model_name: &str,
     collaboration_mode: Option<&str>,
+    collaboration_mode_summary: Option<&str>,
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
 ) -> CompositeHistoryCell {
     let snapshots = rate_limits.map(std::slice::from_ref).unwrap_or_default();
@@ -109,6 +111,7 @@ pub(crate) fn new_status_output(
         now,
         model_name,
         collaboration_mode,
+        collaboration_mode_summary,
         reasoning_effort_override,
         Vec::new(),
     )
@@ -128,6 +131,7 @@ pub(crate) fn new_status_output_with_rate_limits(
     now: DateTime<Local>,
     model_name: &str,
     collaboration_mode: Option<&str>,
+    collaboration_mode_summary: Option<&str>,
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
     lsp_providers: Vec<LspProviderStatus>,
 ) -> CompositeHistoryCell {
@@ -145,6 +149,7 @@ pub(crate) fn new_status_output_with_rate_limits(
         now,
         model_name,
         collaboration_mode,
+        collaboration_mode_summary,
         reasoning_effort_override,
         lsp_providers,
     );
@@ -167,6 +172,7 @@ impl StatusHistoryCell {
         now: DateTime<Local>,
         model_name: &str,
         collaboration_mode: Option<&str>,
+        collaboration_mode_summary: Option<&str>,
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
         lsp_providers: Vec<LspProviderStatus>,
     ) -> Self {
@@ -266,6 +272,7 @@ impl StatusHistoryCell {
             permissions,
             agents_summary,
             collaboration_mode: collaboration_mode.map(ToString::to_string),
+            collaboration_mode_summary: collaboration_mode_summary.map(ToString::to_string),
             model_provider,
             account,
             thread_name,
@@ -476,6 +483,32 @@ impl StatusHistoryCell {
             StatusRateLimitData::Missing => push_label(labels, seen, "Limits"),
         }
     }
+
+    fn collaboration_mode_lines(
+        &self,
+        available_inner_width: usize,
+        formatter: &FieldFormatter,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if let Some(collab_mode) = self.collaboration_mode.as_ref() {
+            lines.push(formatter.line("Collaboration mode", vec![Span::from(collab_mode.clone())]));
+        }
+        let Some(summary) = self.collaboration_mode_summary.as_ref() else {
+            return lines;
+        };
+        let wrapped = adaptive_wrap_lines(
+            [Line::from(vec![Span::from(summary.clone())])],
+            RtOptions::new(formatter.value_width(available_inner_width)),
+        );
+        for (idx, line) in wrapped.into_iter().enumerate() {
+            if idx == 0 {
+                lines.push(formatter.line("Mode behavior", line.spans));
+            } else {
+                lines.push(formatter.continuation(line.spans));
+            }
+        }
+        lines
+    }
 }
 
 impl HistoryCell for StatusHistoryCell {
@@ -531,6 +564,9 @@ impl HistoryCell for StatusHistoryCell {
         if self.collaboration_mode.is_some() {
             push_label(&mut labels, &mut seen, "Collaboration mode");
         }
+        if self.collaboration_mode_summary.is_some() {
+            push_label(&mut labels, &mut seen, "Mode behavior");
+        }
         push_label(&mut labels, &mut seen, "Token usage");
         if self.token_usage.context_window.is_some() {
             push_label(&mut labels, &mut seen, "Context window");
@@ -582,9 +618,7 @@ impl HistoryCell for StatusHistoryCell {
         if let Some(thread_name) = thread_name {
             lines.push(formatter.line("Thread name", vec![Span::from(thread_name.to_string())]));
         }
-        if let Some(collab_mode) = self.collaboration_mode.as_ref() {
-            lines.push(formatter.line("Collaboration mode", vec![Span::from(collab_mode.clone())]));
-        }
+        lines.extend(self.collaboration_mode_lines(available_inner_width, &formatter));
         if let Some(session) = self.session_id.as_ref() {
             lines.push(formatter.line("Session", vec![Span::from(session.clone())]));
         }

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(dead_code))]
+
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use base64::Engine;
@@ -54,6 +56,24 @@ pub struct VoiceCapture {
 }
 
 impl VoiceCapture {
+    #[cfg(test)]
+    fn fake_capture() -> Self {
+        Self {
+            stream: None,
+            sample_rate: MODEL_AUDIO_SAMPLE_RATE,
+            channels: MODEL_AUDIO_CHANNELS,
+            data: Arc::new(Mutex::new(Vec::new())),
+            stopped: Arc::new(AtomicBool::new(false)),
+            last_peak: Arc::new(AtomicU16::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn start() -> Result<Self, String> {
+        Ok(Self::fake_capture())
+    }
+
+    #[cfg(not(test))]
     pub fn start() -> Result<Self, String> {
         let (device, config) = select_default_input_device_and_config()?;
 
@@ -78,6 +98,12 @@ impl VoiceCapture {
         })
     }
 
+    #[cfg(test)]
+    pub fn start_realtime(_config: &Config, _tx: AppEventSender) -> Result<Self, String> {
+        Ok(Self::fake_capture())
+    }
+
+    #[cfg(not(test))]
     pub fn start_realtime(config: &Config, tx: AppEventSender) -> Result<Self, String> {
         let (device, config) = select_realtime_input_device_and_config(config)?;
 

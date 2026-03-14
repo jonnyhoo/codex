@@ -87,9 +87,16 @@ Each response yields:
 Fetch the built-in collaboration mode presets with `collaborationMode/list`. This endpoint does not accept pagination and returns the full list in one response:
 
 - `data` - ordered list of collaboration mode masks (partial settings to apply on top of the base mode)
+  - `description` - short summary of the preset's built-in behavior
+  - `tuiVisible` - boolean indicating whether the preset is surfaced by the built-in TUI picker
+  - `allowsRepoMutation` - boolean indicating whether the preset allows mutating repo-tracked files
+  - `updatePlanAvailable` - boolean indicating whether the preset allows direct use of `update_plan`
+  - `requiresProposedPlanBlock` - boolean indicating whether the preset expects final plan output in a `<proposed_plan>` block
+  - `requestUserInputAvailable` - boolean indicating whether the preset allows direct use of `request_user_input`
+  - `streamsProposedPlan` - boolean indicating whether the preset may stream structured proposed-plan deltas/items to the client
   - For tri-state fields like `reasoning_effort` and `developer_instructions`, omit the field to keep the current value, set it to `null` to clear it, or set a concrete value to update it.
 
-When sending `turn/start` with `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode".
+The list response still omits built-in developer instructions themselves. When sending `turn/start` with `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode".
 
 ## Event stream
 

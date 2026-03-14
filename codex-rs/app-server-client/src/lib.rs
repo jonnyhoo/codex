@@ -21,6 +21,8 @@ use std::io::Error as IoError;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub use codex_app_server::in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
@@ -29,6 +31,8 @@ use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::CollaborationModeListParams;
+use codex_app_server_protocol::CollaborationModeListResponse;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
@@ -49,6 +53,7 @@ use toml::Value as TomlValue;
 use tracing::warn;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
 
 /// Raw app-server request result for typed in-process requests.
 ///
@@ -455,6 +460,18 @@ impl InProcessAppServerClient {
             .map_err(|source| TypedRequestError::Deserialize { method, source })
     }
 
+    /// Lists built-in collaboration mode presets with client-ready behavior metadata.
+    pub async fn list_collaboration_modes(
+        &self,
+        params: CollaborationModeListParams,
+    ) -> Result<CollaborationModeListResponse, TypedRequestError> {
+        self.request_typed(ClientRequest::CollaborationModeList {
+            request_id: next_request_id(),
+            params,
+        })
+        .await
+    }
+
     /// Sends a typed client notification.
     pub async fn notify(&self, notification: ClientNotification) -> IoResult<()> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -599,14 +616,21 @@ fn request_method_name(request: &ClientRequest) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
+fn next_request_id() -> RequestId {
+    RequestId::Integer(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_app_server_protocol::CollaborationModeListParams;
+    use codex_app_server_protocol::CollaborationModeMask;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_core::config::ConfigBuilder;
+    use codex_core::test_support::builtin_collaboration_mode_presets;
     use pretty_assertions::assert_eq;
     use tokio::time::Duration;
     use tokio::time::timeout;
@@ -712,6 +736,21 @@ mod tests {
             })
             .await
             .expect("typed request should succeed");
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn collaboration_mode_list_helper_returns_structured_metadata() {
+        let client = start_test_client(SessionSource::Exec).await;
+        let response = client
+            .list_collaboration_modes(CollaborationModeListParams::default())
+            .await
+            .expect("collaborationMode/list should succeed");
+        let expected: Vec<CollaborationModeMask> = builtin_collaboration_mode_presets()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        assert_eq!(response.data, expected);
         client.shutdown().await.expect("shutdown should complete");
     }
 

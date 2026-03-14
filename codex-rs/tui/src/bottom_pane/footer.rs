@@ -71,9 +71,9 @@ pub(crate) struct FooterProps {
     pub(crate) status_line_enabled: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CollaborationModeIndicator {
-    Plan,
+    Plan(Option<String>),
     #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
     PairProgramming,
     #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
@@ -84,14 +84,15 @@ const MODE_CYCLE_HINT: &str = "shift+tab to cycle";
 const FOOTER_CONTEXT_GAP_COLS: u16 = 1;
 
 impl CollaborationModeIndicator {
-    fn label(self, show_cycle_hint: bool) -> String {
+    fn label(&self, show_cycle_hint: bool) -> String {
         let suffix = if show_cycle_hint {
             format!(" ({MODE_CYCLE_HINT})")
         } else {
             String::new()
         };
         match self {
-            CollaborationModeIndicator::Plan => format!("Plan mode{suffix}"),
+            CollaborationModeIndicator::Plan(Some(label)) => format!("{label}{suffix}"),
+            CollaborationModeIndicator::Plan(None) => format!("Plan mode{suffix}"),
             CollaborationModeIndicator::PairProgramming => {
                 format!("Pair Programming mode{suffix}")
             }
@@ -99,10 +100,10 @@ impl CollaborationModeIndicator {
         }
     }
 
-    fn styled_span(self, show_cycle_hint: bool) -> Span<'static> {
+    fn styled_span(&self, show_cycle_hint: bool) -> Span<'static> {
         let label = self.label(show_cycle_hint);
         match self {
-            CollaborationModeIndicator::Plan => Span::from(label).magenta(),
+            CollaborationModeIndicator::Plan(_) => Span::from(label).magenta(),
             CollaborationModeIndicator::PairProgramming => Span::from(label).cyan(),
             CollaborationModeIndicator::Execute => Span::from(label).dim(),
         }
@@ -208,7 +209,7 @@ pub(crate) fn render_footer_from_props(
     area: Rect,
     buf: &mut Buffer,
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    collaboration_mode_indicator: Option<&CollaborationModeIndicator>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -247,7 +248,7 @@ struct LeftSideState {
 }
 
 fn left_side_line(
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    collaboration_mode_indicator: Option<&CollaborationModeIndicator>,
     state: LeftSideState,
 ) -> Line<'static> {
     let mut line = Line::from("");
@@ -288,7 +289,7 @@ pub(crate) enum SummaryLeft {
 pub(crate) fn single_line_footer_layout(
     area: Rect,
     context_width: u16,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    collaboration_mode_indicator: Option<&CollaborationModeIndicator>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -450,7 +451,7 @@ pub(crate) fn single_line_footer_layout(
 }
 
 pub(crate) fn mode_indicator_line(
-    indicator: Option<CollaborationModeIndicator>,
+    indicator: Option<&CollaborationModeIndicator>,
     show_cycle_hint: bool,
 ) -> Option<Line<'static>> {
     indicator.map(|indicator| Line::from(vec![indicator.styled_span(show_cycle_hint)]))
@@ -557,7 +558,7 @@ pub(crate) fn render_footer_hint_items(area: Rect, buf: &mut Buffer, items: &[(S
 /// formats the chosen/default content.
 fn footer_from_props_lines(
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    collaboration_mode_indicator: Option<&CollaborationModeIndicator>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -620,7 +621,7 @@ fn footer_from_props_lines(
 
 pub(crate) fn footer_line_width(
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    collaboration_mode_indicator: Option<&CollaborationModeIndicator>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -1043,7 +1044,7 @@ mod tests {
                 let left_mode_indicator = if status_line_active {
                     None
                 } else {
-                    collaboration_mode_indicator
+                    collaboration_mode_indicator.as_ref()
                 };
                 let available_width = area.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
                 let mut truncated_status_line = if status_line_active
@@ -1074,8 +1075,9 @@ mod tests {
                     )
                 };
                 let right_line = if status_line_active {
-                    let full = mode_indicator_line(collaboration_mode_indicator, show_cycle_hint);
-                    let compact = mode_indicator_line(collaboration_mode_indicator, false);
+                    let full =
+                        mode_indicator_line(collaboration_mode_indicator.as_ref(), show_cycle_hint);
+                    let compact = mode_indicator_line(collaboration_mode_indicator.as_ref(), false);
                     let full_width = full.as_ref().map(|line| line.width() as u16).unwrap_or(0);
                     if can_show_left_with_context(area, left_width, full_width) {
                         full
@@ -1387,14 +1389,14 @@ mod tests {
             "footer_mode_indicator_wide",
             120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            Some(CollaborationModeIndicator::Plan(None)),
         );
 
         snapshot_footer_with_mode_indicator(
             "footer_mode_indicator_narrow_overlap_hides",
             50,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            Some(CollaborationModeIndicator::Plan(None)),
         );
 
         let props = FooterProps {
@@ -1415,7 +1417,7 @@ mod tests {
             "footer_mode_indicator_running_hides_hint",
             120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            Some(CollaborationModeIndicator::Plan(None)),
         );
 
         let props = FooterProps {
@@ -1484,7 +1486,7 @@ mod tests {
             "footer_status_line_enabled_mode_right",
             120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            Some(CollaborationModeIndicator::Plan(None)),
         );
 
         let props = FooterProps {
@@ -1505,7 +1507,7 @@ mod tests {
             "footer_status_line_disabled_context_right",
             120,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            Some(CollaborationModeIndicator::Plan(None)),
         );
 
         let props = FooterProps {
@@ -1550,7 +1552,7 @@ mod tests {
             "footer_status_line_truncated_with_gap",
             40,
             &props,
-            Some(CollaborationModeIndicator::Plan),
+            Some(CollaborationModeIndicator::Plan(None)),
         );
     }
 
@@ -1573,8 +1575,11 @@ mod tests {
             status_line_enabled: true,
         };
 
-        let screen =
-            render_footer_with_mode_indicator(80, &props, Some(CollaborationModeIndicator::Plan));
+        let screen = render_footer_with_mode_indicator(
+            80,
+            &props,
+            Some(CollaborationModeIndicator::Plan(None)),
+        );
         let collapsed = screen.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             collapsed.contains("Plan mode"),
@@ -1588,6 +1593,35 @@ mod tests {
             screen.contains('…'),
             "status line should be truncated with ellipsis to keep mode indicator"
         );
+    }
+
+    #[test]
+    fn footer_mode_indicator_can_use_custom_plan_label() {
+        let props = FooterProps {
+            mode: FooterMode::ComposerEmpty,
+            esc_backtrack_hint: false,
+            use_shift_enter_hint: false,
+            is_task_running: false,
+            collaboration_modes_enabled: true,
+            is_wsl: false,
+            quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
+            context_window_percent: Some(100),
+            context_window_used_tokens: None,
+            status_line_value: None,
+            status_line_enabled: false,
+        };
+
+        let screen = render_footer_with_mode_indicator(
+            80,
+            &props,
+            Some(CollaborationModeIndicator::Plan(Some(
+                "Design Review".to_string(),
+            ))),
+        );
+        let collapsed = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(collapsed.contains("Design Review"));
+        assert!(!collapsed.contains("Plan mode"));
     }
 
     #[test]

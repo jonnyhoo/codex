@@ -5,7 +5,6 @@ use crate::client_common::tools::FreeformTool;
 use crate::client_common::tools::FreeformToolFormat;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
-use crate::tools::handlers::file_change::execute_verified_action;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
@@ -13,6 +12,7 @@ use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
+use crate::tools::handlers::file_change::execute_verified_action;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
@@ -131,16 +131,18 @@ impl ToolHandler for ApplyPatchHandler {
         let cwd = turn.cwd.clone();
         let command = vec!["apply_patch".to_string(), patch_input.clone()];
         match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &cwd) {
-            codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => execute_verified_action(
-                session,
-                turn,
-                Some(&tracker),
-                &call_id,
-                tool_name.as_str(),
-                changes,
-                None,
-            )
-            .await,
+            codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
+                execute_verified_action(
+                    session,
+                    turn,
+                    Some(&tracker),
+                    &call_id,
+                    tool_name.as_str(),
+                    changes,
+                    None,
+                )
+                .await
+            }
             codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
                 Err(FunctionCallError::RespondToModel(format!(
                     "apply_patch verification failed: {parse_error}"
@@ -182,9 +184,11 @@ pub(crate) async fn intercept_apply_patch(
                     turn.as_ref(),
                 )
                 .await;
-            execute_verified_action(session, turn, tracker, call_id, tool_name, changes, timeout_ms)
-                .await
-                .map(Some)
+            execute_verified_action(
+                session, turn, tracker, call_id, tool_name, changes, timeout_ms,
+            )
+            .await
+            .map(Some)
         }
         codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
             Err(FunctionCallError::RespondToModel(format!(

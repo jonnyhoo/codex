@@ -1,5 +1,6 @@
 ---
 source: tui/src/status/tests.rs
+assertion_line: 216
 expression: sanitized
 ---
 /status
@@ -10,14 +11,16 @@ expression: sanitized
 │ Visit https://chatgpt.com/codex/settings/usage for up-to-date             │
 │ information on rate limits and credits                                    │
 │                                                                           │
-│  Model:            gpt-5.1-codex-max (reasoning high, summaries detailed) │
+│  Model:                gpt-5.1-codex-max (reasoning none, summaries auto) │
 │  Directory: [[workspace]]                                                 │
-│  Permissions:      Default                                                │
-│  Agents.md:        <none>                                                 │
-│  LSP:              disabled                                               │
+│  Permissions:          Custom (read-only, on-request)                     │
+│  Agents.md:            <none>                                             │
+│  Collaboration mode:   Design Review                                      │
+│  Mode behavior:        repo edits blocked · `update_plan` unavailable ·   │
+│                        `request_user_input` available · streams proposed  │
+│                        plan                                               │
+│  LSP:                  disabled                                           │
 │                                                                           │
-│  Token usage:      1.9K total  (1K input + 900 output)                    │
-│  Context window:   100% left (2.25K used / 272K)                          │
-│  5h limit:         [██████░░░░░░░░░░░░░░] 28% left (resets 03:14)         │
-│  Weekly limit:     [███████████░░░░░░░░░] 55% left (resets 03:24)         │
+│  Token usage:          0 total  (0 input + 0 output)                      │
+│  Limits:               data not available yet                             │
 ╰───────────────────────────────────────────────────────────────────────────╯
