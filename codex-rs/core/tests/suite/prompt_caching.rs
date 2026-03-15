@@ -174,6 +174,9 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
     expected_tools_names.extend([
         "update_plan",
         "request_user_input",
+        "lsp",
+        "write_file",
+        "edit_file",
         "apply_patch",
         "web_search",
         "view_image",

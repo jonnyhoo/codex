@@ -8,6 +8,7 @@ mod tests;
 use crate::config::ConfigToml;
 use crate::config_loader::layer_io::LoadedConfigLayers;
 use crate::git_info::resolve_root_git_project_for_trust;
+use crate::util::ancestor_search_boundary;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigRequirementsWithSources;
@@ -770,12 +771,18 @@ async fn find_project_root(
         return Ok(cwd.clone());
     }
 
+    let stop_at = ancestor_search_boundary(cwd.as_path());
     for ancestor in cwd.as_path().ancestors() {
         for marker in project_root_markers {
             let marker_path = ancestor.join(marker);
             if tokio::fs::metadata(&marker_path).await.is_ok() {
                 return AbsolutePathBuf::from_absolute_path(ancestor);
             }
+        }
+        if stop_at.as_ref().is_some_and(|boundary| {
+            normalize_path(ancestor).unwrap_or_else(|_| ancestor.to_path_buf()) == *boundary
+        }) {
+            break;
         }
     }
     Ok(cwd.clone())

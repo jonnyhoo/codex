@@ -43,8 +43,20 @@ pub struct ToolInvocation {
 }
 
 impl ToolInvocation {
-    pub fn runtime_context(&self) -> RuntimeContext {
-        self.turn.runtime_context(self.session.conversation_id)
+    pub async fn runtime_context(&self) -> RuntimeContext {
+        let mut runtime_context = self.turn.runtime_context(self.session.conversation_id);
+        runtime_context.instructions.resolved_layers = Some(
+            self.session
+                .resolve_instruction_layers(self.turn.as_ref())
+                .await,
+        );
+        runtime_context.agent.subagents = self
+            .session
+            .services
+            .agent_control
+            .list_subagents(self.session.conversation_id)
+            .await;
+        runtime_context
     }
 }
 

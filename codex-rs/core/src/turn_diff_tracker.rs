@@ -11,6 +11,7 @@ use sha1::digest::Output;
 use uuid::Uuid;
 
 use crate::protocol::FileChange;
+use crate::util::ancestor_search_boundary;
 
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 const DEV_NULL: &str = "/dev/null";
@@ -159,6 +160,7 @@ impl TurnDiffTracker {
 
         // Walk up to find a `.git` marker.
         let mut cur = dir.to_path_buf();
+        let stop_at = ancestor_search_boundary(dir);
         loop {
             let git_marker = cur.join(".git");
             if git_marker.is_dir() || git_marker.is_file() {
@@ -166,6 +168,12 @@ impl TurnDiffTracker {
                     self.git_root_cache.push(cur.clone());
                 }
                 return Some(cur);
+            }
+
+            if stop_at.as_ref().is_some_and(|boundary| {
+                dunce::canonicalize(&cur).unwrap_or_else(|_| cur.clone()) == *boundary
+            }) {
+                return None;
             }
 
             // On Windows, avoid walking above the drive or UNC share root.

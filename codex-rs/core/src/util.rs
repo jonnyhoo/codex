@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use codex_protocol::ThreadId;
+use dunce::canonicalize as normalize_path;
 use rand::Rng;
 use tracing::debug;
 use tracing::error;
@@ -73,6 +74,19 @@ pub fn resolve_path(base: &Path, path: &PathBuf) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+/// When a path lives under the process temp directory, ancestor-based project discovery should
+/// stop at that temp root instead of escaping into a parent home-directory repo.
+pub(crate) fn ancestor_search_boundary(path: &Path) -> Option<PathBuf> {
+    let base = if path.is_dir() { path } else { path.parent()? };
+    let normalized_base = normalize_path(base).unwrap_or_else(|_| base.to_path_buf());
+    let temp_root = std::env::temp_dir();
+    let normalized_temp_root =
+        normalize_path(&temp_root).unwrap_or_else(|_| temp_root.to_path_buf());
+    normalized_base
+        .starts_with(&normalized_temp_root)
+        .then_some(normalized_temp_root)
 }
 
 /// Trim a thread name and return `None` if it is empty after trimming.

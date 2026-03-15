@@ -24,6 +24,8 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use tracing::Span;
 
@@ -1425,6 +1427,7 @@ async fn set_rate_limits_retains_previous_credits() {
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
         user_instructions: config.user_instructions.clone(),
+        user_instruction_sections: config_user_instruction_sections(&config),
         service_tier: None,
         personality: config.personality,
         base_instructions: config
@@ -1521,6 +1524,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
         user_instructions: config.user_instructions.clone(),
+        user_instruction_sections: config_user_instruction_sections(&config),
         service_tier: None,
         personality: config.personality,
         base_instructions: config
@@ -1853,6 +1857,21 @@ fn session_telemetry(
     )
 }
 
+fn config_user_instruction_sections(config: &Config) -> Vec<InstructionSection> {
+    config
+        .user_instructions
+        .clone()
+        .map(|text| {
+            vec![InstructionSection::new(
+                InstructionAudience::ContextualUser,
+                InstructionPriority::User,
+                InstructionSource::UserConfig,
+                text,
+            )]
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) async fn make_session_configuration_for_tests() -> SessionConfiguration {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
@@ -1875,6 +1894,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
         user_instructions: config.user_instructions.clone(),
+        user_instruction_sections: config_user_instruction_sections(&config),
         service_tier: None,
         personality: config.personality,
         base_instructions: config
@@ -2028,6 +2048,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
         user_instructions: config.user_instructions.clone(),
+        user_instruction_sections: config_user_instruction_sections(&config),
         service_tier: None,
         personality: config.personality,
         base_instructions: config
@@ -2121,6 +2142,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
         user_instructions: config.user_instructions.clone(),
+        user_instruction_sections: config_user_instruction_sections(&config),
         service_tier: None,
         personality: config.personality,
         base_instructions: config
@@ -2679,6 +2701,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
         user_instructions: config.user_instructions.clone(),
+        user_instruction_sections: config_user_instruction_sections(&config),
         service_tier: None,
         personality: config.personality,
         base_instructions: config
@@ -2840,6 +2863,12 @@ async fn turn_context_runtime_context_mirrors_turn_state() {
         runtime.app_server_client_name,
         turn_context.app_server_client_name
     );
+    assert_eq!(runtime.agent.agent_id, None);
+    assert_eq!(runtime.agent.parent_session_id, None);
+    assert_eq!(runtime.agent.depth, None);
+    assert_eq!(runtime.agent.agent_nickname, None);
+    assert_eq!(runtime.agent.agent_role, None);
+    assert_eq!(runtime.agent.subagents, Vec::new());
     assert_eq!(runtime.model.slug, turn_context.model_info.slug);
     assert_eq!(runtime.model.provider, turn_context.provider);
     assert_eq!(
@@ -2863,6 +2892,7 @@ async fn turn_context_runtime_context_mirrors_turn_state() {
         runtime.instructions.compact_prompt,
         turn_context.compact_prompt
     );
+    assert_eq!(runtime.instructions.resolved_layers, None);
     assert_eq!(
         runtime.collaboration.mode_kind,
         turn_context.collaboration_mode.mode
@@ -2903,8 +2933,37 @@ async fn turn_context_runtime_context_mirrors_turn_state() {
 }
 
 #[tokio::test]
+async fn turn_context_runtime_context_captures_spawned_agent_state() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    let parent_session_id = ThreadId::new();
+    turn_context.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: parent_session_id,
+        depth: 2,
+        agent_nickname: Some("Curie".to_string()),
+        agent_role: Some("explorer".to_string()),
+    });
+
+    let runtime = turn_context.runtime_context(session.conversation_id);
+
+    assert_eq!(runtime.agent.agent_id, Some(session.conversation_id));
+    assert_eq!(runtime.agent.parent_session_id, Some(parent_session_id));
+    assert_eq!(runtime.agent.depth, Some(2));
+    assert_eq!(runtime.agent.agent_nickname, Some("Curie".to_string()));
+    assert_eq!(runtime.agent.agent_role, Some("explorer".to_string()));
+    assert_eq!(runtime.agent.subagents, Vec::new());
+}
+
+#[tokio::test]
 async fn tool_invocation_runtime_context_uses_session_and_turn() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.user_instruction_sections = vec![InstructionSection::new(
+        InstructionAudience::ContextualUser,
+        InstructionPriority::Repo,
+        InstructionSource::ProjectDoc,
+        "repo instructions",
+    )];
+    turn_context.user_instructions =
+        crate::project_doc::join_user_instruction_sections(&turn_context.user_instruction_sections);
     let invocation = ToolInvocation {
         session: Arc::new(session),
         turn: Arc::new(turn_context),
@@ -2916,7 +2975,7 @@ async fn tool_invocation_runtime_context_uses_session_and_turn() {
         },
     };
 
-    let runtime = invocation.runtime_context();
+    let runtime = invocation.runtime_context().await;
 
     assert_eq!(runtime.session_id, invocation.session.conversation_id);
     assert_eq!(runtime.turn_id, invocation.turn.sub_id);
@@ -2924,13 +2983,41 @@ async fn tool_invocation_runtime_context_uses_session_and_turn() {
         runtime.collaboration.mode_kind,
         invocation.turn.collaboration_mode.mode
     );
+    assert_eq!(
+        runtime.instructions.user_instruction_sections,
+        invocation.turn.user_instruction_sections
+    );
+    assert_eq!(runtime.agent.subagents, Vec::new());
+    let resolved_layers = runtime
+        .instructions
+        .resolved_layers
+        .expect("tool runtime should expose resolved instruction layers");
+    assert_eq!(
+        resolved_layers.base_instructions,
+        invocation.session.get_base_instructions().await.text
+    );
+    assert!(
+        resolved_layers.sections.iter().any(|section| {
+            section.source == InstructionSource::ProjectDoc
+                && section.text.contains("repo instructions")
+        }),
+        "expected resolved project-doc section in runtime context: {:?}",
+        resolved_layers.sections
+    );
 }
 
 #[tokio::test]
 async fn resolve_instruction_layers_preserves_base_and_user_sections() {
     let (session, mut turn_context) = make_session_and_context().await;
     turn_context.developer_instructions = Some("developer override".to_string());
-    turn_context.user_instructions = Some("repo instructions".to_string());
+    turn_context.user_instruction_sections = vec![InstructionSection::new(
+        InstructionAudience::ContextualUser,
+        InstructionPriority::Repo,
+        InstructionSource::ProjectDoc,
+        "repo instructions",
+    )];
+    turn_context.user_instructions =
+        crate::project_doc::join_user_instruction_sections(&turn_context.user_instruction_sections);
 
     let resolved = session.resolve_instruction_layers(&turn_context).await;
 
@@ -2939,20 +3026,21 @@ async fn resolve_instruction_layers_preserves_base_and_user_sections() {
         session.get_base_instructions().await.text
     );
     assert!(
-        resolved
-            .developer_sections
-            .iter()
-            .any(|section| section.contains("developer override")),
-        "expected developer override in resolved developer sections: {:?}",
-        resolved.developer_sections
+        resolved.sections.iter().any(|section| {
+            section.source == InstructionSource::DeveloperOverride
+                && section.text.contains("developer override")
+        }),
+        "expected developer override in resolved sections: {:?}",
+        resolved.sections
     );
     assert!(
-        resolved
-            .contextual_user_sections
-            .iter()
-            .any(|section| section.contains("repo instructions")),
-        "expected repo/user instructions in contextual user sections: {:?}",
-        resolved.contextual_user_sections
+        resolved.sections.iter().any(|section| {
+            section.source == InstructionSource::ProjectDoc
+                && section.priority == InstructionPriority::Repo
+                && section.text.contains("repo instructions")
+        }),
+        "expected repo/user instructions in resolved sections: {:?}",
+        resolved.sections
     );
 }
 

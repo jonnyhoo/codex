@@ -64,7 +64,7 @@ impl ToolHandler for RequestUserInputHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let runtime_context = invocation.runtime_context();
+        let runtime_context = invocation.runtime_context().await;
         let ToolInvocation {
             session,
             turn,

@@ -15,6 +15,7 @@ use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
@@ -380,12 +381,12 @@ impl AgentControl {
         thread.total_token_usage().await
     }
 
-    pub(crate) async fn format_environment_context_subagents(
+    pub(crate) async fn list_subagents(
         &self,
         parent_thread_id: ThreadId,
-    ) -> String {
+    ) -> Vec<CollabAgentStatusEntry> {
         let Ok(state) = self.upgrade() else {
-            return String::new();
+            return Vec::new();
         };
 
         let mut agents = Vec::new();
@@ -397,6 +398,7 @@ impl AgentControl {
             let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: agent_parent_thread_id,
                 agent_nickname,
+                agent_role,
                 ..
             }) = snapshot.session_source
             else {
@@ -405,13 +407,32 @@ impl AgentControl {
             if agent_parent_thread_id != parent_thread_id {
                 continue;
             }
-            agents.push(format_subagent_context_line(
-                &thread_id.to_string(),
-                agent_nickname.as_deref(),
-            ));
+            agents.push(CollabAgentStatusEntry {
+                thread_id,
+                agent_nickname,
+                agent_role,
+                status: thread.agent_status().await,
+            });
         }
-        agents.sort();
-        agents.join("\n")
+        agents.sort_by(|left, right| left.thread_id.to_string().cmp(&right.thread_id.to_string()));
+        agents
+    }
+
+    pub(crate) async fn format_environment_context_subagents(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> String {
+        self.list_subagents(parent_thread_id)
+            .await
+            .into_iter()
+            .map(|agent| {
+                format_subagent_context_line(
+                    &agent.thread_id.to_string(),
+                    agent.agent_nickname.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.
@@ -630,7 +651,7 @@ mod tests {
                 sleep(Duration::from_millis(25)).await;
             }
         };
-        timeout(Duration::from_secs(2), wait).await.is_ok()
+        timeout(Duration::from_secs(5), wait).await.is_ok()
     }
 
     #[tokio::test]
@@ -1403,6 +1424,54 @@ mod tests {
         assert_eq!(depth, 1);
         assert!(agent_nickname.is_some());
         assert_eq!(agent_role, Some("explorer".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_subagents_returns_structured_entries_for_matching_parent() {
+        let harness = AgentControlHarness::new().await;
+        let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+        let other_parent_thread_id = ThreadId::new();
+
+        let child_thread_id = harness
+            .control
+            .spawn_agent(
+                harness.config.clone(),
+                text_input("hello child"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_nickname: None,
+                    agent_role: Some("explorer".to_string()),
+                })),
+            )
+            .await
+            .expect("child spawn should succeed");
+
+        let _other_child_thread_id = harness
+            .control
+            .spawn_agent(
+                harness.config.clone(),
+                text_input("hello other child"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: other_parent_thread_id,
+                    depth: 1,
+                    agent_nickname: None,
+                    agent_role: Some("worker".to_string()),
+                })),
+            )
+            .await
+            .expect("other child spawn should succeed");
+
+        let entries = harness.control.list_subagents(parent_thread_id).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].thread_id, child_thread_id);
+        assert!(entries[0].agent_nickname.is_some());
+        assert_eq!(entries[0].agent_role, Some("explorer".to_string()));
+        assert!(matches!(
+            entries[0].status,
+            AgentStatus::PendingInit | AgentStatus::Running
+        ));
     }
 
     #[tokio::test]

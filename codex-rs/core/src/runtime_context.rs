@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::InstructionSection;
+use crate::ResolvedInstructionLayers;
 use crate::config::Constrained;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::model_provider_info::ModelProviderInfo;
@@ -16,6 +18,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TurnContextNetworkItem;
 
@@ -34,11 +37,22 @@ pub(crate) struct RuntimeContext {
     pub current_date: Option<String>,
     pub timezone: Option<String>,
     pub app_server_client_name: Option<String>,
+    pub agent: RuntimeAgentContext,
     pub model: RuntimeModelContext,
     pub instructions: RuntimeInstructionContext,
     pub collaboration: RuntimeCollaborationContext,
     pub execution: RuntimeExecutionContext,
     pub tools: RuntimeToolsContext,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeAgentContext {
+    pub agent_id: Option<ThreadId>,
+    pub parent_session_id: Option<ThreadId>,
+    pub depth: Option<i32>,
+    pub agent_nickname: Option<String>,
+    pub agent_role: Option<String>,
+    pub subagents: Vec<CollabAgentStatusEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,7 +68,9 @@ pub(crate) struct RuntimeModelContext {
 pub(crate) struct RuntimeInstructionContext {
     pub developer_instructions: Option<String>,
     pub user_instructions: Option<String>,
+    pub user_instruction_sections: Vec<InstructionSection>,
     pub compact_prompt: Option<String>,
+    pub resolved_layers: Option<ResolvedInstructionLayers>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

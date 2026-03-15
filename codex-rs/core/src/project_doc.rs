@@ -15,6 +15,10 @@
 //!     that order.
 //! 3.  We do **not** walk past the project root.
 
+use crate::InstructionAudience;
+use crate::InstructionPriority;
+use crate::InstructionSection;
+use crate::InstructionSource;
 use crate::config::Config;
 use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::default_project_root_markers;
@@ -79,26 +83,43 @@ fn render_js_repl_instructions(config: &Config) -> Option<String> {
 
 /// Combines `Config::instructions` and `AGENTS.md` (if present) into a single
 /// string of instructions.
+#[cfg(test)]
 pub(crate) async fn get_user_instructions(
     config: &Config,
     skills: Option<&[SkillMetadata]>,
     plugins: Option<&[PluginCapabilitySummary]>,
 ) -> Option<String> {
+    let sections = get_user_instruction_sections(config, skills, plugins).await;
+    join_user_instruction_sections(&sections)
+}
+
+pub(crate) async fn get_user_instruction_sections(
+    config: &Config,
+    skills: Option<&[SkillMetadata]>,
+    plugins: Option<&[PluginCapabilitySummary]>,
+) -> Vec<InstructionSection> {
     let project_docs = read_project_docs(config).await;
 
-    let mut output = String::new();
+    let mut sections = Vec::with_capacity(7);
 
-    if let Some(instructions) = config.user_instructions.clone() {
-        output.push_str(&instructions);
+    if let Some(instructions) = config.user_instructions.clone()
+        && !instructions.is_empty()
+    {
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::User,
+            InstructionSource::UserConfig,
+            instructions,
+        ));
     }
 
     match project_docs {
-        Ok(Some(docs)) => {
-            if !output.is_empty() {
-                output.push_str(PROJECT_DOC_SEPARATOR);
-            }
-            output.push_str(&docs);
-        }
+        Ok(Some(docs)) => sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::Repo,
+            InstructionSource::ProjectDoc,
+            docs,
+        )),
         Ok(None) => {}
         Err(e) => {
             error!("error trying to find project doc: {e:#}");
@@ -106,46 +127,74 @@ pub(crate) async fn get_user_instructions(
     };
 
     if let Some(js_repl_section) = render_js_repl_instructions(config) {
-        if !output.is_empty() {
-            output.push_str("\n\n");
-        }
-        output.push_str(&js_repl_section);
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::System,
+            InstructionSource::JsRepl,
+            js_repl_section,
+        ));
     }
 
     if let Some(plugin_section) = plugins.and_then(render_plugins_section) {
-        if !output.is_empty() {
-            output.push_str("\n\n");
-        }
-        output.push_str(&plugin_section);
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::System,
+            InstructionSource::Plugins,
+            plugin_section,
+        ));
     }
 
     if let Some(code_mode_section) = code_mode::instructions(config) {
-        if !output.is_empty() {
-            output.push_str("\n\n");
-        }
-        output.push_str(&code_mode_section);
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::System,
+            InstructionSource::CodeMode,
+            code_mode_section,
+        ));
     }
 
     let skills_section = skills.and_then(render_skills_section);
     if let Some(skills_section) = skills_section {
-        if !output.is_empty() {
-            output.push_str("\n\n");
-        }
-        output.push_str(&skills_section);
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::Skill,
+            InstructionSource::Skills,
+            skills_section,
+        ));
     }
 
     if config.features.enabled(Feature::ChildAgentsMd) {
-        if !output.is_empty() {
-            output.push_str("\n\n");
-        }
-        output.push_str(HIERARCHICAL_AGENTS_MESSAGE);
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::System,
+            InstructionSource::ChildAgents,
+            HIERARCHICAL_AGENTS_MESSAGE,
+        ));
     }
 
-    if !output.is_empty() {
-        Some(output)
-    } else {
-        None
+    sections
+}
+
+pub(crate) fn join_user_instruction_sections(sections: &[InstructionSection]) -> Option<String> {
+    let mut output = String::new();
+    let mut previous_source = None;
+
+    for section in sections {
+        if !output.is_empty() {
+            let separator = if previous_source == Some(InstructionSource::UserConfig)
+                && section.source == InstructionSource::ProjectDoc
+            {
+                PROJECT_DOC_SEPARATOR
+            } else {
+                "\n\n"
+            };
+            output.push_str(separator);
+        }
+        output.push_str(&section.text);
+        previous_source = Some(section.source);
     }
+
+    (!output.is_empty()).then_some(output)
 }
 
 /// Attempt to locate and load the project documentation.
@@ -735,6 +784,45 @@ mod tests {
             "base doc\n\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.\n### Available skills\n- pdf-processing: extract from pdfs (file: {expected_path_str})\n### How to use skills\n{usage_rules}"
         );
         assert_eq!(res, expected);
+    }
+
+    #[tokio::test]
+    async fn user_instruction_sections_preserve_source_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("AGENTS.md"), "repo doc").unwrap();
+
+        let cfg = make_config(&tmp, 4096, Some("user instructions")).await;
+        create_skill(cfg.codex_home.clone(), "linting", "run clippy");
+
+        let skills = load_test_skills(&cfg);
+        let sections = get_user_instruction_sections(
+            &cfg,
+            skills.errors.is_empty().then_some(skills.skills.as_slice()),
+            None,
+        )
+        .await;
+        let sources = sections
+            .iter()
+            .map(|section| section.source)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            sources,
+            vec![
+                InstructionSource::UserConfig,
+                InstructionSource::ProjectDoc,
+                InstructionSource::Skills,
+            ]
+        );
+        assert_eq!(
+            join_user_instruction_sections(&sections),
+            get_user_instructions(
+                &cfg,
+                skills.errors.is_empty().then_some(skills.skills.as_slice()),
+                None
+            )
+            .await
+        );
     }
 
     #[tokio::test]

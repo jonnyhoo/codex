@@ -1693,14 +1693,31 @@ async fn ensure_node_version(node_path: &Path) -> Result<(), String> {
 }
 
 pub(crate) async fn resolve_compatible_node(config_path: Option<&Path>) -> Result<PathBuf, String> {
-    let node_path = resolve_node(config_path).ok_or_else(|| {
-        "Node runtime not found; install Node or set CODEX_JS_REPL_NODE_PATH".to_string()
-    })?;
-    ensure_node_version(&node_path).await?;
-    Ok(node_path)
+    if let Some(path) = explicit_node_path(config_path) {
+        ensure_node_version(&path).await?;
+        return Ok(path);
+    }
+
+    let mut first_error = None;
+    for path in path_node_candidates() {
+        match ensure_node_version(&path).await {
+            Ok(()) => return Ok(path),
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+    }
+
+    if let Some(err) = first_error {
+        Err(err)
+    } else {
+        Err("Node runtime not found; install Node or set CODEX_JS_REPL_NODE_PATH".to_string())
+    }
 }
 
-pub(crate) fn resolve_node(config_path: Option<&Path>) -> Option<PathBuf> {
+fn explicit_node_path(config_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CODEX_JS_REPL_NODE_PATH") {
         let p = PathBuf::from(path);
         if p.exists() {
@@ -1714,11 +1731,35 @@ pub(crate) fn resolve_node(config_path: Option<&Path>) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
 
-    if let Ok(path) = which::which("node") {
-        return Some(path);
+    None
+}
+
+fn path_node_candidates() -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::<PathBuf>::new();
+    let mut candidates = Vec::new();
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+
+    #[cfg(windows)]
+    let file_names = ["node.exe", "node.cmd", "node.bat"];
+    #[cfg(not(windows))]
+    let file_names = ["node"];
+
+    for dir in std::env::split_paths(&path_env) {
+        for file_name in file_names {
+            let candidate = dir.join(file_name);
+            if candidate.exists() && seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
     }
 
-    None
+    if let Ok(path) = which::which("node")
+        && seen.insert(path.clone())
+    {
+        candidates.push(path);
+    }
+
+    candidates
 }
 
 #[cfg(test)]

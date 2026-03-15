@@ -193,7 +193,12 @@ pub(crate) struct PreviousTurnSettings {
     pub(crate) realtime_active: Option<bool>,
 }
 
+use crate::InstructionAudience;
+use crate::InstructionPriority;
+use crate::InstructionSection;
+use crate::InstructionSource;
 use crate::ResolvedInstructionLayers;
+use crate::RuntimeAgentContext;
 use crate::RuntimeCollaborationContext;
 use crate::RuntimeContext;
 use crate::RuntimeExecutionContext;
@@ -226,7 +231,8 @@ use crate::mentions::collect_tool_mentions_from_messages;
 use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::plugins::PluginsManager;
 use crate::plugins::build_plugin_injections;
-use crate::project_doc::get_user_instructions;
+use crate::project_doc::get_user_instruction_sections;
+use crate::project_doc::join_user_instruction_sections;
 use crate::protocol::AgentMessageContentDeltaEvent;
 use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
@@ -426,12 +432,13 @@ impl Codex {
 
         let allowed_skills_for_implicit_invocation =
             loaded_skills.allowed_skills_for_implicit_invocation();
-        let user_instructions = get_user_instructions(
+        let user_instruction_sections = get_user_instruction_sections(
             &config,
             Some(&allowed_skills_for_implicit_invocation),
             Some(loaded_plugins.capability_summaries()),
         )
         .await;
+        let user_instructions = join_user_instruction_sections(&user_instruction_sections);
 
         let exec_policy = if crate::guardian::is_guardian_subagent_source(&session_source) {
             // Guardian review should rely on the built-in shell safety checks,
@@ -516,6 +523,7 @@ impl Codex {
             service_tier: config.service_tier,
             developer_instructions: config.developer_instructions.clone(),
             user_instructions,
+            user_instruction_sections,
             personality: config.personality,
             base_instructions,
             compact_prompt: config.compact_prompt.clone(),
@@ -715,6 +723,7 @@ pub(crate) struct TurnContext {
     pub(crate) developer_instructions: Option<String>,
     pub(crate) compact_prompt: Option<String>,
     pub(crate) user_instructions: Option<String>,
+    pub(crate) user_instruction_sections: Vec<InstructionSection>,
     pub(crate) collaboration_mode: CollaborationMode,
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: Constrained<AskForApproval>,
@@ -748,6 +757,7 @@ impl TurnContext {
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
             app_server_client_name: self.app_server_client_name.clone(),
+            agent: runtime_agent_context(&session_id, &self.session_source),
             model: RuntimeModelContext {
                 slug: self.model_info.slug.clone(),
                 provider: self.provider.clone(),
@@ -758,7 +768,9 @@ impl TurnContext {
             instructions: RuntimeInstructionContext {
                 developer_instructions: self.developer_instructions.clone(),
                 user_instructions: self.user_instructions.clone(),
+                user_instruction_sections: self.user_instruction_sections.clone(),
                 compact_prompt: self.compact_prompt.clone(),
+                resolved_layers: None,
             },
             collaboration: RuntimeCollaborationContext {
                 mode_kind: self.collaboration_mode.mode,
@@ -855,6 +867,7 @@ impl TurnContext {
             developer_instructions: self.developer_instructions.clone(),
             compact_prompt: self.compact_prompt.clone(),
             user_instructions: self.user_instructions.clone(),
+            user_instruction_sections: self.user_instruction_sections.clone(),
             collaboration_mode,
             personality: self.personality,
             approval_policy: self.approval_policy.clone(),
@@ -928,6 +941,34 @@ impl TurnContext {
     }
 }
 
+fn runtime_agent_context(
+    session_id: &ThreadId,
+    session_source: &SessionSource,
+) -> RuntimeAgentContext {
+    let (agent_id, parent_session_id, depth) = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth,
+            ..
+        }) => (Some(*session_id), Some(*parent_thread_id), Some(*depth)),
+        SessionSource::SubAgent(_) => (Some(*session_id), None, None),
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Unknown => (None, None, None),
+    };
+
+    RuntimeAgentContext {
+        agent_id,
+        parent_session_id,
+        depth,
+        agent_nickname: session_source.get_nickname(),
+        agent_role: session_source.get_agent_role(),
+        subagents: Vec::new(),
+    }
+}
+
 fn local_time_context() -> (String, String) {
     match iana_time_zone::get_timezone() {
         Ok(timezone) => (Local::now().format("%Y-%m-%d").to_string(), timezone),
@@ -952,6 +993,7 @@ pub(crate) struct SessionConfiguration {
 
     /// Model instructions that are appended to the base instructions.
     user_instructions: Option<String>,
+    user_instruction_sections: Vec<InstructionSection>,
 
     /// Personality preference for the model.
     personality: Option<Personality>,
@@ -1279,6 +1321,7 @@ impl Session {
             developer_instructions: session_configuration.developer_instructions.clone(),
             compact_prompt: session_configuration.compact_prompt.clone(),
             user_instructions: session_configuration.user_instructions.clone(),
+            user_instruction_sections: session_configuration.user_instruction_sections.clone(),
             collaboration_mode: session_configuration.collaboration_mode.clone(),
             personality: session_configuration.personality,
             approval_policy: session_configuration.approval_policy.clone(),
@@ -3406,31 +3449,63 @@ impl Session {
         turn_context: &TurnContext,
     ) -> Vec<ResponseItem> {
         let resolved_layers = self.resolve_instruction_layers(turn_context).await;
+        let developer_sections = resolved_layers.developer_sections();
+        let contextual_user_sections =
+            self.render_contextual_user_sections(&resolved_layers, turn_context);
 
         let mut items = Vec::with_capacity(2);
         if let Some(developer_message) =
-            crate::context_manager::updates::build_developer_update_item(
-                resolved_layers.developer_sections,
-            )
+            crate::context_manager::updates::build_developer_update_item(developer_sections)
         {
             items.push(developer_message);
         }
         if let Some(contextual_user_message) =
-            crate::context_manager::updates::build_contextual_user_message(
-                resolved_layers.contextual_user_sections,
-            )
+            crate::context_manager::updates::build_contextual_user_message(contextual_user_sections)
         {
             items.push(contextual_user_message);
         }
         items
     }
 
+    fn render_contextual_user_sections(
+        &self,
+        resolved_layers: &ResolvedInstructionLayers,
+        turn_context: &TurnContext,
+    ) -> Vec<String> {
+        let mut rendered = Vec::with_capacity(2);
+        let user_sections = resolved_layers
+            .sections
+            .iter()
+            .filter(|section| {
+                section.audience == InstructionAudience::ContextualUser
+                    && section.source != InstructionSource::EnvironmentContext
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(user_instructions) = join_user_instruction_sections(&user_sections) {
+            rendered.push(
+                UserInstructions {
+                    text: user_instructions,
+                    directory: turn_context.cwd.to_string_lossy().into_owned(),
+                }
+                .serialize_to_text(),
+            );
+        }
+        rendered.extend(
+            resolved_layers
+                .sections
+                .iter()
+                .filter(|section| section.source == InstructionSource::EnvironmentContext)
+                .map(|section| section.text.clone()),
+        );
+        rendered
+    }
+
     pub(crate) async fn resolve_instruction_layers(
         &self,
         turn_context: &TurnContext,
     ) -> ResolvedInstructionLayers {
-        let mut developer_sections = Vec::<String>::with_capacity(8);
-        let mut contextual_user_sections = Vec::<String>::with_capacity(2);
+        let mut sections = Vec::<InstructionSection>::with_capacity(12);
         let shell = self.user_shell();
         let (reference_context_item, previous_turn_settings, collaboration_mode, base_instructions) = {
             let state = self.state.lock().await;
@@ -3447,9 +3522,17 @@ impl Session {
                 turn_context,
             )
         {
-            developer_sections.push(model_switch_message.into_text());
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::Runtime,
+                InstructionSource::ModelSwitch,
+                model_switch_message.into_text(),
+            ));
         }
-        developer_sections.push(
+        sections.push(InstructionSection::new(
+            InstructionAudience::Developer,
+            InstructionPriority::System,
+            InstructionSource::PlatformPolicy,
             DeveloperInstructions::from_policy(
                 turn_context.sandbox_policy.get(),
                 turn_context.approval_policy.value(),
@@ -3458,28 +3541,48 @@ impl Session {
                 turn_context.features.enabled(Feature::RequestPermissions),
             )
             .into_text(),
-        );
+        ));
         if let Some(developer_instructions) = turn_context.developer_instructions.as_deref() {
-            developer_sections.push(developer_instructions.to_string());
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::Developer,
+                InstructionSource::DeveloperOverride,
+                developer_instructions,
+            ));
         }
         if turn_context.features.enabled(Feature::MemoryTool)
             && turn_context.config.memories.use_memories
             && let Some(memory_prompt) =
                 build_memory_tool_developer_instructions(&turn_context.config.codex_home).await
         {
-            developer_sections.push(memory_prompt);
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::System,
+                InstructionSource::MemoryTool,
+                memory_prompt,
+            ));
         }
         if let Some(collab_instructions) =
             DeveloperInstructions::from_collaboration_mode(&collaboration_mode)
         {
-            developer_sections.push(collab_instructions.into_text());
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::Mode,
+                InstructionSource::CollaborationMode,
+                collab_instructions.into_text(),
+            ));
         }
         if let Some(realtime_update) = crate::context_manager::updates::build_initial_realtime_item(
             reference_context_item.as_ref(),
             previous_turn_settings.as_ref(),
             turn_context,
         ) {
-            developer_sections.push(realtime_update.into_text());
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::Runtime,
+                InstructionSource::RealtimeContext,
+                realtime_update.into_text(),
+            ));
         }
         if self.features.enabled(Feature::Personality)
             && let Some(personality) = turn_context.personality
@@ -3494,46 +3597,53 @@ impl Session {
                         personality,
                     )
             {
-                developer_sections.push(
+                sections.push(InstructionSection::new(
+                    InstructionAudience::Developer,
+                    InstructionPriority::System,
+                    InstructionSource::Personality,
                     DeveloperInstructions::personality_spec_message(personality_message)
                         .into_text(),
-                );
+                ));
             }
         }
         if turn_context.apps_enabled() {
-            developer_sections.push(render_apps_section());
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::System,
+                InstructionSource::Apps,
+                render_apps_section(),
+            ));
         }
         if turn_context.features.enabled(Feature::CodexGitCommit)
             && let Some(commit_message_instruction) = commit_message_trailer_instruction(
                 turn_context.config.commit_attribution.as_deref(),
             )
         {
-            developer_sections.push(commit_message_instruction);
+            sections.push(InstructionSection::new(
+                InstructionAudience::Developer,
+                InstructionPriority::System,
+                InstructionSource::CommitMessage,
+                commit_message_instruction,
+            ));
         }
-        if let Some(user_instructions) = turn_context.user_instructions.as_deref() {
-            contextual_user_sections.push(
-                UserInstructions {
-                    text: user_instructions.to_string(),
-                    directory: turn_context.cwd.to_string_lossy().into_owned(),
-                }
-                .serialize_to_text(),
-            );
-        }
+        sections.extend(turn_context.user_instruction_sections.iter().cloned());
         let subagents = self
             .services
             .agent_control
             .format_environment_context_subagents(self.conversation_id)
             .await;
-        contextual_user_sections.push(
+        sections.push(InstructionSection::new(
+            InstructionAudience::ContextualUser,
+            InstructionPriority::Runtime,
+            InstructionSource::EnvironmentContext,
             EnvironmentContext::from_turn_context(turn_context, shell.as_ref())
                 .with_subagents(subagents)
                 .serialize_to_xml(),
-        );
+        ));
 
         ResolvedInstructionLayers {
             base_instructions,
-            developer_sections,
-            contextual_user_sections,
+            sections,
         }
     }
 
@@ -5288,6 +5398,7 @@ async fn spawn_review_thread(
         app_server_client_name: parent_turn_context.app_server_client_name.clone(),
         developer_instructions: None,
         user_instructions: None,
+        user_instruction_sections: Vec::new(),
         compact_prompt: parent_turn_context.compact_prompt.clone(),
         collaboration_mode: parent_turn_context.collaboration_mode.clone(),
         personality: parent_turn_context.personality,

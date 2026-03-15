@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::util::ancestor_search_boundary;
 use crate::util::resolve_path;
 use codex_app_server_protocol::GitSha;
 use codex_protocol::protocol::GitInfo;
@@ -49,6 +50,8 @@ pub struct GitDiffToRemote {
 /// Uses timeouts to prevent freezing on large repositories.
 /// All git commands (except the initial repo check) run in parallel for better performance.
 pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
+    resolve_root_git_project_for_trust(cwd)?;
+
     // Check if we're in a git repository first
     let is_git_repo = run_git_command_with_timeout(&["rev-parse", "--git-dir"], cwd)
         .await?
@@ -143,6 +146,8 @@ pub async fn get_head_commit_hash(cwd: &Path) -> Option<String> {
 }
 
 pub async fn get_has_changes(cwd: &Path) -> Option<bool> {
+    resolve_root_git_project_for_trust(cwd)?;
+
     let output = run_git_command_with_timeout(&["status", "--porcelain"], cwd).await?;
     if !output.status.success() {
         return None;
@@ -629,11 +634,18 @@ pub fn resolve_root_git_project_for_trust(cwd: &Path) -> Option<PathBuf> {
 
 fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut dir = base_dir.to_path_buf();
+    let stop_at = ancestor_search_boundary(base_dir);
 
     loop {
         let dot_git = dir.join(".git");
         if dot_git.exists() {
             return Some((dir, dot_git));
+        }
+
+        if stop_at.as_ref().is_some_and(|boundary| {
+            dunce::canonicalize(&dir).unwrap_or_else(|_| dir.clone()) == *boundary
+        }) {
+            break;
         }
 
         // Pop one component (go up one directory). `pop` returns false when

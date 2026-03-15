@@ -12,6 +12,7 @@ use crate::skills::model::SkillMetadata;
 use crate::skills::model::SkillPolicy;
 use crate::skills::model::SkillToolDependency;
 use crate::skills::system::system_cache_root_dir;
+use crate::util::ancestor_search_boundary;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SkillScope;
@@ -322,12 +323,18 @@ fn find_project_root(cwd: &Path, project_root_markers: &[String]) -> PathBuf {
         return cwd.to_path_buf();
     }
 
+    let stop_at = ancestor_search_boundary(cwd);
     for ancestor in cwd.ancestors() {
         for marker in project_root_markers {
             let marker_path = ancestor.join(marker);
             if marker_path.exists() {
                 return ancestor.to_path_buf();
             }
+        }
+        if stop_at.as_ref().is_some_and(|boundary| {
+            canonicalize_path(ancestor).unwrap_or_else(|_| ancestor.to_path_buf()) == *boundary
+        }) {
+            break;
         }
     }
 
