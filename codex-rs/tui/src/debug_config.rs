@@ -44,6 +44,10 @@ pub(crate) fn new_debug_config_output(
     PlainHistoryCell::new(lines)
 }
 
+pub(crate) fn new_debug_runtime_output(text: &str) -> PlainHistoryCell {
+    PlainHistoryCell::new(text.lines().map(|line| line.to_string().into()).collect())
+}
+
 fn session_all_proxy_url(http_addr: &str, socks_addr: &str, socks_enabled: bool) -> String {
     if socks_enabled {
         format!("socks5h://{socks_addr}")

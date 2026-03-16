@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::InstructionSection;
 use crate::ResolvedInstructionLayers;
+use crate::RuntimeToolPolicyContext;
 use crate::config::Constrained;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::model_provider_info::ModelProviderInfo;
@@ -94,4 +95,5 @@ pub(crate) struct RuntimeExecutionContext {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuntimeToolsContext {
     pub tools_config: ToolsConfig,
+    pub tool_policy: RuntimeToolPolicyContext,
 }

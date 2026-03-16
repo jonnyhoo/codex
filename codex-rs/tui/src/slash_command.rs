@@ -38,6 +38,7 @@ pub enum SlashCommand {
     Mention,
     Status,
     DebugConfig,
+    DebugRuntime,
     Statusline,
     Theme,
     Mcp,
@@ -85,6 +86,9 @@ impl SlashCommand {
                 "show current session configuration, token usage, and LSP status"
             }
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
+            SlashCommand::DebugRuntime => {
+                "show resolved runtime and instruction layers for debugging"
+            }
             SlashCommand::Statusline => "configure which items appear in the status line",
             SlashCommand::Theme => "choose a syntax highlighting theme",
             SlashCommand::Ps => "list background terminals",
@@ -162,6 +166,7 @@ impl SlashCommand {
             | SlashCommand::Skills
             | SlashCommand::Status
             | SlashCommand::DebugConfig
+            | SlashCommand::DebugRuntime
             | SlashCommand::Ps
             | SlashCommand::Clean
             | SlashCommand::Mcp

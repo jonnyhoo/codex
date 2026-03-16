@@ -103,6 +103,7 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::BackgroundEventEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::CreditsSnapshot;
+use codex_protocol::protocol::DebugRuntimeResponseEvent;
 use codex_protocol::protocol::DeprecationNoticeEvent;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -4188,6 +4189,9 @@ impl ChatWidget {
             SlashCommand::DebugConfig => {
                 self.add_debug_config_output();
             }
+            SlashCommand::DebugRuntime => {
+                self.submit_op(Op::DebugRuntime);
+            }
             SlashCommand::Statusline => {
                 self.open_status_line_setup();
             }
@@ -5033,6 +5037,7 @@ impl ChatWidget {
             EventMsg::WebSearchBegin(ev) => self.on_web_search_begin(ev),
             EventMsg::WebSearchEnd(ev) => self.on_web_search_end(ev),
             EventMsg::GetHistoryEntryResponse(ev) => self.on_get_history_entry_response(ev),
+            EventMsg::DebugRuntimeResponse(ev) => self.on_debug_runtime_response(ev),
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
@@ -5392,6 +5397,10 @@ impl ChatWidget {
             &self.config,
             self.session_network_proxy.as_ref(),
         ));
+    }
+
+    fn on_debug_runtime_response(&mut self, ev: DebugRuntimeResponseEvent) {
+        self.add_to_history(crate::debug_config::new_debug_runtime_output(&ev.text));
     }
 
     fn open_status_line_setup(&mut self) {

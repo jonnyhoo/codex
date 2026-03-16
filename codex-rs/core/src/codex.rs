@@ -193,6 +193,8 @@ pub(crate) struct PreviousTurnSettings {
     pub(crate) realtime_active: Option<bool>,
 }
 
+use crate::AppToolPolicy;
+use crate::CodexAppToolPolicyInput;
 use crate::InstructionAudience;
 use crate::InstructionPriority;
 use crate::InstructionSection;
@@ -204,6 +206,7 @@ use crate::RuntimeContext;
 use crate::RuntimeExecutionContext;
 use crate::RuntimeInstructionContext;
 use crate::RuntimeModelContext;
+use crate::RuntimeToolPolicyContext;
 use crate::RuntimeToolsContext;
 use crate::exec_policy::ExecPolicyUpdateError;
 use crate::feedback_tags;
@@ -747,6 +750,21 @@ pub(crate) struct TurnContext {
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
 }
 impl TurnContext {
+    pub(crate) fn runtime_tool_policy(&self) -> RuntimeToolPolicyContext {
+        crate::tool_policy::runtime_tool_policy(
+            self.config.as_ref(),
+            self.collaboration_mode.mode,
+            &self.tools_config,
+        )
+    }
+
+    pub(crate) fn codex_app_tool_policy(
+        &self,
+        input: CodexAppToolPolicyInput<'_>,
+    ) -> AppToolPolicy {
+        crate::tool_policy::app_tool_policy(self.config.as_ref(), input)
+    }
+
     pub(crate) fn runtime_context(&self, session_id: ThreadId) -> RuntimeContext {
         RuntimeContext {
             session_id,
@@ -788,6 +806,7 @@ impl TurnContext {
             },
             tools: RuntimeToolsContext {
                 tools_config: self.tools_config.clone(),
+                tool_policy: self.runtime_tool_policy(),
             },
         }
     }
@@ -3647,6 +3666,55 @@ impl Session {
         }
     }
 
+    pub(crate) async fn build_debug_runtime_text(&self, sub_id: String) -> String {
+        let session_configuration = {
+            let state = self.state.lock().await;
+            state.session_configuration.clone()
+        };
+        let per_turn_config = Self::build_per_turn_config(&session_configuration);
+        let model_info = self
+            .services
+            .models_manager
+            .get_model_info(
+                session_configuration.collaboration_mode.model(),
+                &per_turn_config,
+            )
+            .await;
+        let skills_outcome = Arc::new(
+            self.services
+                .skills_manager
+                .skills_for_cwd(&session_configuration.cwd, false)
+                .await,
+        );
+        let mut turn_context = Self::make_turn_context(
+            Some(Arc::clone(&self.services.auth_manager)),
+            &self.services.session_telemetry,
+            session_configuration.provider.clone(),
+            &session_configuration,
+            per_turn_config,
+            model_info,
+            self.services
+                .network_proxy
+                .as_ref()
+                .map(StartedNetworkProxy::proxy),
+            sub_id,
+            Arc::clone(&self.js_repl),
+            skills_outcome,
+        );
+        turn_context.realtime_active = self.conversation.running_state().await.is_some();
+
+        let mut runtime_context = turn_context.runtime_context(self.conversation_id);
+        runtime_context.instructions.resolved_layers =
+            Some(self.resolve_instruction_layers(&turn_context).await);
+        runtime_context.agent.subagents = self
+            .services
+            .agent_control
+            .list_subagents(self.conversation_id)
+            .await;
+
+        crate::debug_runtime::render_debug_runtime_text(&runtime_context)
+    }
+
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
         let recorder = {
             let guard = self.services.rollout.lock().await;
@@ -4336,6 +4404,10 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     handlers::list_custom_prompts(&sess, sub.id.clone()).await;
                     false
                 }
+                Op::DebugRuntime => {
+                    handlers::debug_runtime(&sess, sub.id.clone()).await;
+                    false
+                }
                 Op::ListSkills { cwds, force_reload } => {
                     handlers::list_skills(&sess, sub.id.clone(), cwds, force_reload).await;
                     false
@@ -4831,6 +4903,17 @@ mod handlers {
             id: sub_id,
             msg: EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
                 custom_prompts,
+            }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    pub async fn debug_runtime(sess: &Session, sub_id: String) {
+        let text = sess.build_debug_runtime_text(sub_id.clone()).await;
+        let event = Event {
+            id: sub_id,
+            msg: EventMsg::DebugRuntimeResponse(crate::protocol::DebugRuntimeResponseEvent {
+                text,
             }),
         };
         sess.send_event_raw(event).await;
@@ -6687,6 +6770,7 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::TurnComplete(_)
         | EventMsg::TokenCount(_)
         | EventMsg::UserMessage(_)
+        | EventMsg::DebugRuntimeResponse(_)
         | EventMsg::AgentMessageDelta(_)
         | EventMsg::AgentReasoning(_)
         | EventMsg::AgentReasoningDelta(_)
@@ -7087,7 +7171,7 @@ async fn try_run_sampling_request(
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
     let mut should_emit_turn_diff = false;
-    let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
+    let plan_mode = turn_context.collaboration_mode.mode.streams_proposed_plan();
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
     let receiving_span = trace_span!("receiving_stream");

@@ -15,13 +15,13 @@ pub use codex_app_server_protocol::AppInfo;
 pub use codex_app_server_protocol::AppMetadata;
 use codex_protocol::protocol::SandboxPolicy;
 use rmcp::model::ToolAnnotations;
-use serde::Deserialize;
 use tracing::warn;
 
 use crate::AuthManager;
 use crate::CodexAuth;
 use crate::SandboxState;
 use crate::config::Config;
+#[cfg(test)]
 use crate::config::types::AppToolApproval;
 use crate::config::types::AppsConfigToml;
 use crate::default_client::is_first_party_chat_originator;
@@ -37,24 +37,11 @@ use crate::mcp_connection_manager::codex_apps_tools_cache_key;
 use crate::plugins::AppConnectorId;
 use crate::plugins::PluginsManager;
 use crate::token_data::TokenData;
+use crate::tool_policy;
+use crate::tool_policy::AppToolPolicy;
 
 pub const CONNECTORS_CACHE_TTL: Duration = Duration::from_secs(3600);
 const CONNECTORS_READY_TIMEOUT_ON_EMPTY_TOOLS: Duration = Duration::from_secs(30);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AppToolPolicy {
-    pub enabled: bool,
-    pub approval: AppToolApproval,
-}
-
-impl Default for AppToolPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            approval: AppToolApproval::Auto,
-        }
-    }
-}
 
 #[derive(Clone, PartialEq, Eq)]
 struct AccessibleConnectorsCacheKey {
@@ -418,10 +405,11 @@ pub fn merge_plugin_apps_with_accessible(
 }
 
 pub fn with_app_enabled_state(mut connectors: Vec<AppInfo>, config: &Config) -> Vec<AppInfo> {
-    let apps_config = read_apps_config(config);
+    let apps_config = tool_policy::read_apps_config(config);
     if let Some(apps_config) = apps_config.as_ref() {
         for connector in &mut connectors {
-            connector.is_enabled = app_is_enabled(apps_config, Some(connector.id.as_str()));
+            connector.is_enabled =
+                tool_policy::app_is_enabled(apps_config, Some(connector.id.as_str()));
         }
     }
     connectors
@@ -446,13 +434,14 @@ pub(crate) fn app_tool_policy(
     tool_title: Option<&str>,
     annotations: Option<&ToolAnnotations>,
 ) -> AppToolPolicy {
-    let apps_config = read_apps_config(config);
-    app_tool_policy_from_apps_config(
-        apps_config.as_ref(),
-        connector_id,
-        tool_name,
-        tool_title,
-        annotations,
+    tool_policy::app_tool_policy(
+        config,
+        tool_policy::CodexAppToolPolicyInput {
+            connector_id,
+            tool_name,
+            tool_title,
+            annotations,
+        },
     )
 }
 
@@ -524,25 +513,12 @@ fn is_connector_id_allowed_for_originator(connector_id: &str, originator_value: 
         && !disallowed_connector_ids.contains(&connector_id)
 }
 
-fn read_apps_config(config: &Config) -> Option<AppsConfigToml> {
-    let effective_config = config.config_layer_stack.effective_config();
-    let apps_config = effective_config.as_table()?.get("apps")?.clone();
-    AppsConfigToml::deserialize(apps_config).ok()
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 fn app_is_enabled(apps_config: &AppsConfigToml, connector_id: Option<&str>) -> bool {
-    let default_enabled = apps_config
-        .default
-        .as_ref()
-        .map(|defaults| defaults.enabled)
-        .unwrap_or(true);
-
-    connector_id
-        .and_then(|connector_id| apps_config.apps.get(connector_id))
-        .map(|app| app.enabled)
-        .unwrap_or(default_enabled)
+    tool_policy::app_is_enabled(apps_config, connector_id)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn app_tool_policy_from_apps_config(
     apps_config: Option<&AppsConfigToml>,
     connector_id: Option<&str>,
@@ -550,63 +526,15 @@ fn app_tool_policy_from_apps_config(
     tool_title: Option<&str>,
     annotations: Option<&ToolAnnotations>,
 ) -> AppToolPolicy {
-    let Some(apps_config) = apps_config else {
-        return AppToolPolicy::default();
-    };
-
-    let app = connector_id.and_then(|connector_id| apps_config.apps.get(connector_id));
-    let tools = app.and_then(|app| app.tools.as_ref());
-    let tool_config = tools.and_then(|tools| {
-        tools
-            .tools
-            .get(tool_name)
-            .or_else(|| tool_title.and_then(|title| tools.tools.get(title)))
-    });
-    let approval = tool_config
-        .and_then(|tool| tool.approval_mode)
-        .or_else(|| app.and_then(|app| app.default_tools_approval_mode))
-        .unwrap_or(AppToolApproval::Auto);
-
-    if !app_is_enabled(apps_config, connector_id) {
-        return AppToolPolicy {
-            enabled: false,
-            approval,
-        };
-    }
-
-    if let Some(enabled) = tool_config.and_then(|tool| tool.enabled) {
-        return AppToolPolicy { enabled, approval };
-    }
-
-    if let Some(enabled) = app.and_then(|app| app.default_tools_enabled) {
-        return AppToolPolicy { enabled, approval };
-    }
-
-    let app_defaults = apps_config.default.as_ref();
-    let destructive_enabled = app
-        .and_then(|app| app.destructive_enabled)
-        .unwrap_or_else(|| {
-            app_defaults
-                .map(|defaults| defaults.destructive_enabled)
-                .unwrap_or(true)
-        });
-    let open_world_enabled = app
-        .and_then(|app| app.open_world_enabled)
-        .unwrap_or_else(|| {
-            app_defaults
-                .map(|defaults| defaults.open_world_enabled)
-                .unwrap_or(true)
-        });
-    let destructive_hint = annotations
-        .and_then(|annotations| annotations.destructive_hint)
-        .unwrap_or(false);
-    let open_world_hint = annotations
-        .and_then(|annotations| annotations.open_world_hint)
-        .unwrap_or(false);
-    let enabled =
-        (destructive_enabled || !destructive_hint) && (open_world_enabled || !open_world_hint);
-
-    AppToolPolicy { enabled, approval }
+    tool_policy::app_tool_policy_from_apps_config(
+        apps_config,
+        tool_policy::CodexAppToolPolicyInput {
+            connector_id,
+            tool_name,
+            tool_title,
+            annotations,
+        },
+    )
 }
 
 fn collect_accessible_connectors<I>(tools: I) -> Vec<AppInfo>

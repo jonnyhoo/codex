@@ -43,6 +43,7 @@ pub struct ToolInvocation {
 }
 
 impl ToolInvocation {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn runtime_context(&self) -> RuntimeContext {
         let mut runtime_context = self.turn.runtime_context(self.session.conversation_id);
         runtime_context.instructions.resolved_layers = Some(

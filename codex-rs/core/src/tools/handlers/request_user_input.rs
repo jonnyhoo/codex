@@ -11,8 +11,7 @@ use codex_protocol::config_types::TUI_VISIBLE_COLLABORATION_MODES;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 
 fn request_user_input_is_available(mode: ModeKind, default_mode_request_user_input: bool) -> bool {
-    mode.allows_request_user_input()
-        || (default_mode_request_user_input && mode == ModeKind::Default)
+    mode.request_user_input_available(default_mode_request_user_input)
 }
 
 fn format_allowed_modes(default_mode_request_user_input: bool) -> String {
@@ -64,7 +63,6 @@ impl ToolHandler for RequestUserInputHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let runtime_context = invocation.runtime_context().await;
         let ToolInvocation {
             session,
             turn,
@@ -82,10 +80,17 @@ impl ToolHandler for RequestUserInputHandler {
             }
         };
 
-        let mode = runtime_context.collaboration.mode_kind;
-        if let Some(message) =
-            request_user_input_unavailable_message(mode, self.default_mode_request_user_input)
-        {
+        let mode = turn.collaboration_mode.mode;
+        let tool_policy = turn.runtime_tool_policy();
+        if !tool_policy.collaboration.request_user_input_available {
+            let message =
+                request_user_input_unavailable_message(mode, self.default_mode_request_user_input)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "request_user_input is unavailable in {} mode",
+                            mode.display_name()
+                        )
+                    });
             return Err(FunctionCallError::RespondToModel(message));
         }
 

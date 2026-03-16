@@ -2902,6 +2902,66 @@ async fn turn_context_runtime_context_mirrors_turn_state() {
         turn_context.collaboration_mode
     );
     assert_eq!(
+        runtime.tools.tool_policy.collaboration.allows_repo_mutation,
+        turn_context.collaboration_mode.mode.allows_repo_mutation()
+    );
+    assert_eq!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .update_plan_available,
+        turn_context.collaboration_mode.mode.update_plan_available()
+    );
+    assert_eq!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .requires_proposed_plan_block,
+        turn_context
+            .collaboration_mode
+            .mode
+            .requires_proposed_plan_block()
+    );
+    assert_eq!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .streams_proposed_plan,
+        turn_context.collaboration_mode.mode.streams_proposed_plan()
+    );
+    assert_eq!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .request_user_input_available,
+        turn_context.tools_config.request_user_input
+            && turn_context
+                .collaboration_mode
+                .mode
+                .request_user_input_available(
+                    turn_context.tools_config.default_mode_request_user_input,
+                )
+    );
+    assert!(runtime.tools.tool_policy.codex_apps.default_app_enabled);
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .codex_apps
+            .default_destructive_enabled
+    );
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .codex_apps
+            .default_open_world_enabled
+    );
+    assert_eq!(
         runtime.collaboration.realtime_active,
         turn_context.realtime_active
     );
@@ -2951,6 +3011,78 @@ async fn turn_context_runtime_context_captures_spawned_agent_state() {
     assert_eq!(runtime.agent.agent_nickname, Some("Curie".to_string()));
     assert_eq!(runtime.agent.agent_role, Some("explorer".to_string()));
     assert_eq!(runtime.agent.subagents, Vec::new());
+}
+
+#[tokio::test]
+async fn turn_context_runtime_context_derives_tool_policy_from_mode_and_tools() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.tools_config.default_mode_request_user_input = true;
+
+    let runtime = turn_context.runtime_context(session.conversation_id);
+
+    assert!(runtime.tools.tool_policy.collaboration.allows_repo_mutation);
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .update_plan_available
+    );
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .request_user_input_available
+    );
+    assert!(
+        !runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .requires_proposed_plan_block
+    );
+    assert!(
+        !runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .streams_proposed_plan
+    );
+    assert!(!runtime.tools.tool_policy.codex_apps.apps_configured);
+
+    turn_context.collaboration_mode.mode = ModeKind::Plan;
+    let runtime = turn_context.runtime_context(session.conversation_id);
+
+    assert!(!runtime.tools.tool_policy.collaboration.allows_repo_mutation);
+    assert!(
+        !runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .update_plan_available
+    );
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .request_user_input_available
+    );
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .requires_proposed_plan_block
+    );
+    assert!(
+        runtime
+            .tools
+            .tool_policy
+            .collaboration
+            .streams_proposed_plan
+    );
 }
 
 #[tokio::test]
@@ -3041,6 +3173,40 @@ async fn resolve_instruction_layers_preserves_base_and_user_sections() {
         }),
         "expected repo/user instructions in resolved sections: {:?}",
         resolved.sections
+    );
+}
+
+#[tokio::test]
+async fn build_debug_runtime_text_includes_resolved_layers() {
+    let (session, _turn_context) = make_session_and_context().await;
+
+    let text = session
+        .build_debug_runtime_text("debug-runtime-test".to_string())
+        .await;
+
+    assert!(
+        text.contains("/debug-runtime"),
+        "expected debug runtime header, got: {text}"
+    );
+    assert!(
+        text.contains("Instructions:"),
+        "expected instructions section, got: {text}"
+    );
+    assert!(
+        text.contains("resolved_layers"),
+        "expected resolved layer summary, got: {text}"
+    );
+    assert!(
+        text.contains("base_instructions"),
+        "expected base instructions in debug runtime output, got: {text}"
+    );
+    assert!(
+        text.contains("Tools:"),
+        "expected tools section in debug runtime output, got: {text}"
+    );
+    assert!(
+        text.contains("tool_policy"),
+        "expected tool policy in debug runtime output, got: {text}"
     );
 }
 

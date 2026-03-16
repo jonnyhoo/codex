@@ -348,6 +348,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::WebSearchBegin(_)
                     | EventMsg::WebSearchEnd(_)
                     | EventMsg::GetHistoryEntryResponse(_)
+                    | EventMsg::DebugRuntimeResponse(_)
                     | EventMsg::PlanUpdate(_)
                     | EventMsg::TurnAborted(_)
                     | EventMsg::UserMessage(_)

@@ -336,6 +336,27 @@ impl ModeKind {
     pub const fn allows_request_user_input(self) -> bool {
         matches!(self, Self::Plan)
     }
+
+    pub const fn request_user_input_available(self, default_mode_request_user_input: bool) -> bool {
+        self.allows_request_user_input()
+            || (default_mode_request_user_input && matches!(self, Self::Default))
+    }
+
+    pub const fn allows_repo_mutation(self) -> bool {
+        !matches!(self, Self::Plan)
+    }
+
+    pub const fn update_plan_available(self) -> bool {
+        !matches!(self, Self::Plan)
+    }
+
+    pub const fn requires_proposed_plan_block(self) -> bool {
+        matches!(self, Self::Plan)
+    }
+
+    pub const fn streams_proposed_plan(self) -> bool {
+        matches!(self, Self::Plan)
+    }
 }
 
 /// Collaboration mode for a Codex session.
@@ -481,6 +502,22 @@ mod tests {
 
         assert!(!ModeKind::PairProgramming.is_tui_visible());
         assert!(!ModeKind::Execute.is_tui_visible());
+    }
+
+    #[test]
+    fn mode_kind_policy_flags_match_default_and_plan_expectations() {
+        assert!(ModeKind::Default.allows_repo_mutation());
+        assert!(ModeKind::Default.update_plan_available());
+        assert!(!ModeKind::Default.requires_proposed_plan_block());
+        assert!(!ModeKind::Default.streams_proposed_plan());
+        assert!(!ModeKind::Default.request_user_input_available(false));
+        assert!(ModeKind::Default.request_user_input_available(true));
+
+        assert!(!ModeKind::Plan.allows_repo_mutation());
+        assert!(!ModeKind::Plan.update_plan_available());
+        assert!(ModeKind::Plan.requires_proposed_plan_block());
+        assert!(ModeKind::Plan.streams_proposed_plan());
+        assert!(ModeKind::Plan.request_user_input_available(false));
     }
 
     #[test]

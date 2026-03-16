@@ -6120,6 +6120,40 @@ async fn slash_memory_update_submits_update_memories_op() {
 }
 
 #[tokio::test]
+async fn slash_debug_runtime_submits_debug_runtime_op() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::DebugRuntime);
+
+    assert_matches!(op_rx.try_recv(), Ok(Op::DebugRuntime));
+}
+
+#[tokio::test]
+async fn debug_runtime_response_inserts_history_output() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "debug-runtime".into(),
+        msg: EventMsg::DebugRuntimeResponse(codex_protocol::protocol::DebugRuntimeResponseEvent {
+            text: "/debug-runtime\n\nSession:\n  - session_id: runtime-test".to_string(),
+        }),
+    });
+
+    let rendered = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => lines_to_single_string(&cell.display_lines(80)),
+        other => panic!("expected InsertHistoryCell event, got {other:?}"),
+    };
+    assert!(
+        rendered.contains("/debug-runtime"),
+        "expected debug runtime header, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("session_id: runtime-test"),
+        "expected runtime payload, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
 async fn slash_resume_opens_picker() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
 

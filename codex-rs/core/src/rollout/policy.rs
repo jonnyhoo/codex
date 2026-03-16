@@ -153,6 +153,7 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::PatchApplyBegin(_)
         | EventMsg::TurnDiff(_)
         | EventMsg::GetHistoryEntryResponse(_)
+        | EventMsg::DebugRuntimeResponse(_)
         | EventMsg::UndoStarted(_)
         | EventMsg::McpListToolsResponse(_)
         | EventMsg::McpStartupUpdate(_)

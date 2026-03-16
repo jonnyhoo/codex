@@ -1800,7 +1800,7 @@ fn collaboration_mode_request_user_input_available(
         "The `request_user_input` tool is unavailable in Default mode.";
 
     match mode {
-        Some(mode) if mode != ModeKind::Default => mode.allows_request_user_input(),
+        Some(mode) if mode != ModeKind::Default => mode.request_user_input_available(false),
         _ => developer_instructions
             .and_then(|instructions| {
                 if instructions.contains(DEFAULT_MODE_REQUEST_USER_INPUT_AVAILABLE) {
@@ -1808,7 +1808,7 @@ fn collaboration_mode_request_user_input_available(
                 } else if instructions.contains(DEFAULT_MODE_REQUEST_USER_INPUT_UNAVAILABLE) {
                     Some(false)
                 } else {
-                    mode.map(ModeKind::allows_request_user_input)
+                    mode.map(|mode| mode.request_user_input_available(false))
                 }
             })
             .unwrap_or(false),
@@ -1816,7 +1816,7 @@ fn collaboration_mode_request_user_input_available(
 }
 
 fn collaboration_mode_allows_repo_mutation(mode: Option<ModeKind>) -> bool {
-    !matches!(mode, Some(ModeKind::Plan))
+    mode.is_none_or(ModeKind::allows_repo_mutation)
 }
 
 fn collaboration_mode_tui_visible(mode: Option<ModeKind>) -> bool {
@@ -1824,15 +1824,15 @@ fn collaboration_mode_tui_visible(mode: Option<ModeKind>) -> bool {
 }
 
 fn collaboration_mode_update_plan_available(mode: Option<ModeKind>) -> bool {
-    !matches!(mode, Some(ModeKind::Plan))
+    mode.is_none_or(ModeKind::update_plan_available)
 }
 
 fn collaboration_mode_requires_proposed_plan_block(mode: Option<ModeKind>) -> bool {
-    matches!(mode, Some(ModeKind::Plan))
+    mode.is_some_and(ModeKind::requires_proposed_plan_block)
 }
 
 fn collaboration_mode_streams_proposed_plan(mode: Option<ModeKind>) -> bool {
-    matches!(mode, Some(ModeKind::Plan))
+    mode.is_some_and(ModeKind::streams_proposed_plan)
 }
 
 /// EXPERIMENTAL - collaboration mode presets response.

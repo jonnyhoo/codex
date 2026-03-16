@@ -449,6 +449,9 @@ pub enum Op {
     /// involve the model.
     SetThreadName { name: String },
 
+    /// Request a debug snapshot of the current runtime/instruction state.
+    DebugRuntime,
+
     /// Request Codex to undo a turn (turn are stacked so it is the same effect as CMD + Z).
     Undo,
 
@@ -1206,6 +1209,9 @@ pub enum EventMsg {
 
     /// Response to GetHistoryEntryRequest.
     GetHistoryEntryResponse(GetHistoryEntryResponseEvent),
+
+    /// Response to `Op::DebugRuntime`.
+    DebugRuntimeResponse(DebugRuntimeResponseEvent),
 
     /// List of MCP tools available to the agent.
     McpListToolsResponse(McpListToolsResponseEvent),
@@ -2753,6 +2759,12 @@ pub struct GetHistoryEntryResponseEvent {
     /// The entry at the requested offset, if available and parseable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<HistoryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct DebugRuntimeResponseEvent {
+    /// Human-readable runtime snapshot for internal debugging surfaces.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

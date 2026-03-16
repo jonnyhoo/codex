@@ -83,9 +83,7 @@ fn request_user_input_availability_message(
     default_mode_request_user_input: bool,
 ) -> String {
     let mode_name = mode.display_name();
-    if mode.allows_request_user_input()
-        || (default_mode_request_user_input && mode == ModeKind::Default)
-    {
+    if mode.request_user_input_available(default_mode_request_user_input) {
         format!("The `request_user_input` tool is available in {mode_name} mode.")
     } else {
         format!(

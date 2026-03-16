@@ -28,6 +28,7 @@ use crate::protocol::McpInvocation;
 use crate::protocol::McpToolCallBeginEvent;
 use crate::protocol::McpToolCallEndEvent;
 use crate::state_db;
+use crate::tool_policy;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::McpToolOutput;
 use codex_protocol::openai_models::InputModality;
@@ -80,21 +81,20 @@ pub(crate) async fn handle_mcp_tool_call(
     let metadata =
         lookup_mcp_tool_metadata(sess.as_ref(), turn_context.as_ref(), &server, &tool_name).await;
     let app_tool_policy = if server == CODEX_APPS_MCP_SERVER_NAME {
-        connectors::app_tool_policy(
-            &turn_context.config,
-            metadata
+        turn_context.codex_app_tool_policy(tool_policy::CodexAppToolPolicyInput {
+            connector_id: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.connector_id.as_deref()),
-            &tool_name,
-            metadata
+            tool_name: &tool_name,
+            tool_title: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.tool_title.as_deref()),
-            metadata
+            annotations: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.annotations.as_ref()),
-        )
+        })
     } else {
-        connectors::AppToolPolicy::default()
+        tool_policy::AppToolPolicy::default()
     };
 
     if server == CODEX_APPS_MCP_SERVER_NAME && !app_tool_policy.enabled {
