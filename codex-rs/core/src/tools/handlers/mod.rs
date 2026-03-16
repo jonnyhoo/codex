@@ -1,6 +1,7 @@
 pub(crate) mod agent_jobs;
 pub mod apply_patch;
 mod artifacts;
+mod build_test;
 mod code_mode;
 mod dynamic;
 mod edit_file;
@@ -37,6 +38,8 @@ use crate::sandboxing::merge_permission_profiles;
 use crate::sandboxing::normalize_additional_permissions;
 pub use apply_patch::ApplyPatchHandler;
 pub use artifacts::ArtifactsHandler;
+pub use build_test::RunProjectChecksHandler;
+pub(crate) use build_test::run_project_checks_tool_description;
 pub use code_mode::CodeModeHandler;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;

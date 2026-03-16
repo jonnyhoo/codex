@@ -18,6 +18,7 @@ use crate::tools::handlers::multi_agents::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::request_permissions_tool_description;
 use crate::tools::handlers::request_user_input_tool_description;
+use crate::tools::handlers::run_project_checks_tool_description;
 use crate::tools::registry::ToolRegistryBuilder;
 use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
@@ -1151,6 +1152,72 @@ fn create_request_user_input_tool(
     })
 }
 
+fn create_run_project_checks_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "task".to_string(),
+        JsonSchema::String {
+            description: Some("One of: detect, build, test, verify".to_string()),
+        },
+    );
+    properties.insert(
+        "project_type".to_string(),
+        JsonSchema::String {
+            description: Some("Optional override: auto, rust, node, python, go".to_string()),
+        },
+    );
+    properties.insert(
+        "workdir".to_string(),
+        JsonSchema::String {
+            description: Some("Optional working directory used for project detection.".to_string()),
+        },
+    );
+    properties.insert(
+        "target".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional crate/package/path target for supported project types.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "test_filter".to_string(),
+        JsonSchema::String {
+            description: Some("Optional test name/filter for supported project types.".to_string()),
+        },
+    );
+    properties.insert(
+        "quick".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Prefer faster validation plans when true (default).".to_string()),
+        },
+    );
+    properties.insert(
+        "continue_on_error".to_string(),
+        JsonSchema::Boolean {
+            description: Some("Continue running later steps after a failure.".to_string()),
+        },
+    );
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::Number {
+            description: Some("Optional per-step timeout in milliseconds.".to_string()),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "run_project_checks".to_string(),
+        description: run_project_checks_tool_description(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["task".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
 fn create_request_permissions_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -2215,6 +2282,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::RequestPermissionsHandler;
     use crate::tools::handlers::RequestUserInputHandler;
+    use crate::tools::handlers::RunProjectChecksHandler;
     use crate::tools::handlers::SearchToolBm25Handler;
     use crate::tools::handlers::ShellCommandHandler;
     use crate::tools::handlers::ShellHandler;
@@ -2239,6 +2307,7 @@ pub(crate) fn build_specs(
     let request_user_input_handler = Arc::new(RequestUserInputHandler {
         default_mode_request_user_input: config.default_mode_request_user_input,
     });
+    let run_project_checks_handler = Arc::new(RunProjectChecksHandler);
     let search_tool_handler = Arc::new(SearchToolBm25Handler);
     let code_mode_handler = Arc::new(CodeModeHandler);
     let js_repl_handler = Arc::new(JsReplHandler);
@@ -2305,6 +2374,8 @@ pub(crate) fn build_specs(
         builder.register_handler("container.exec", shell_handler.clone());
         builder.register_handler("local_shell", shell_handler);
         builder.register_handler("shell_command", shell_command_handler);
+        builder.push_spec(create_run_project_checks_tool());
+        builder.register_handler("run_project_checks", run_project_checks_handler);
     }
 
     if mcp_tools.is_some() {
@@ -3080,6 +3151,7 @@ mod tests {
         } else {
             vec![shell_tool]
         };
+        expected.push("run_project_checks");
         expected.extend(expected_tail);
         assert_model_tools(model_slug, features, web_search_mode, &expected);
     }
@@ -3320,6 +3392,7 @@ mod tests {
             &[
                 "exec_command",
                 "write_stdin",
+                "run_project_checks",
                 "update_plan",
                 "request_user_input",
                 "lsp",
@@ -3343,6 +3416,7 @@ mod tests {
             &[
                 "exec_command",
                 "write_stdin",
+                "run_project_checks",
                 "update_plan",
                 "request_user_input",
                 "lsp",
@@ -3449,6 +3523,7 @@ mod tests {
             &[
                 "exec_command",
                 "write_stdin",
+                "run_project_checks",
                 "update_plan",
                 "request_user_input",
                 "lsp",
@@ -3476,7 +3551,12 @@ mod tests {
         let (tools, _) = build_specs(&tools_config, Some(HashMap::new()), None, &[]).build();
 
         // Only check the shell variant and a couple of core tools.
-        let mut subset = vec!["exec_command", "write_stdin", "update_plan"];
+        let mut subset = vec![
+            "exec_command",
+            "write_stdin",
+            "run_project_checks",
+            "update_plan",
+        ];
         if let Some(shell_tool) = shell_tool_name(&tools_config) {
             subset.push(shell_tool);
         }
