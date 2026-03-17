@@ -1752,6 +1752,17 @@ impl CollaborationModeMask {
         value: CoreCollaborationModeMask,
         default_mode_request_user_input: bool,
     ) -> Self {
+        let request_user_input_available = collaboration_mode_request_user_input_available(
+            value.mode,
+            default_mode_request_user_input,
+        );
+        Self::from_core_with_request_user_input_available(value, request_user_input_available)
+    }
+
+    pub fn from_core_with_request_user_input_available(
+        value: CoreCollaborationModeMask,
+        request_user_input_available: bool,
+    ) -> Self {
         Self {
             description: collaboration_mode_description(value.mode, &value.name),
             tui_visible: collaboration_mode_tui_visible(value.mode),
@@ -1764,10 +1775,7 @@ impl CollaborationModeMask {
             mode: value.mode,
             model: value.model,
             reasoning_effort: value.reasoning_effort,
-            request_user_input_available: collaboration_mode_request_user_input_available(
-                value.mode,
-                default_mode_request_user_input,
-            ),
+            request_user_input_available,
             streams_proposed_plan: collaboration_mode_streams_proposed_plan(value.mode),
         }
     }

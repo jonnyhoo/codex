@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.1
+
+This fork keeps the upstream `rust-v0.114.0` rebase while tightening the fork's
+npm release path for the next publish.
+
+### Highlights
+
+- Rust workspace and npm package version bumped to `0.3.1`.
+- `codex-cli` now exposes a working `pnpm stage-release` wrapper for this fork.
+- Release docs now match the real tarball-based flow and publish platform tarballs before the meta package.
+- The fork staging path now requires explicit native artifact input (`--vendor-src` or `--workflow-url`) instead of assuming upstream tag naming.
+
+### Validation
+
+- `pnpm --dir codex-cli stage-release --help`
+- local npm staging smoke for `@jonnyhoo/codex` `0.3.1` using upstream `rust-v0.114.0` Windows x64 release assets
+
 ## v0.3.0
 
 This fork rebases onto upstream `rust-v0.114.0` and carries the fork-specific tooling and packaging layer forward under a fresh fork release number.

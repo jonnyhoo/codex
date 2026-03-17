@@ -189,6 +189,8 @@ pub use safety::get_platform_sandbox;
 pub(crate) use tool_policy::AppToolPolicy;
 pub(crate) use tool_policy::CodexAppToolPolicyInput;
 pub(crate) use tool_policy::RuntimeToolPolicyContext;
+pub(crate) use tool_policy::request_user_input_allowed_modes_message;
+pub(crate) use tool_policy::request_user_input_is_available;
 pub use tools::spec::parse_tool_input_schema;
 pub use turn_metadata::build_turn_metadata_header;
 pub mod compact;

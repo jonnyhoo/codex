@@ -1,4 +1,3 @@
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::is_safe_command::is_known_safe_command;
 use crate::protocol::EventMsg;
@@ -15,6 +14,7 @@ use crate::tools::handlers::apply_patch::intercept_apply_patch;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
+use crate::tools::handlers::request_permission_enabled_for_turn;
 use crate::tools::handlers::resolve_workdir_base_path;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
@@ -169,8 +169,6 @@ impl ToolHandler for UnifiedExecHandler {
                     ..
                 } = args;
 
-                let request_permission_enabled =
-                    session.features().enabled(Feature::RequestPermissions);
                 let effective_additional_permissions = apply_granted_turn_permissions(
                     context.session.as_ref(),
                     sandbox_permissions,
@@ -202,7 +200,10 @@ impl ToolHandler for UnifiedExecHandler {
                 let cwd = workdir.clone().unwrap_or(cwd);
                 let normalized_additional_permissions =
                     match normalize_and_validate_additional_permissions(
-                        request_permission_enabled,
+                        request_permission_enabled_for_turn(
+                            context.session.as_ref(),
+                            context.turn.as_ref(),
+                        ),
                         context.turn.approval_policy.value(),
                         effective_additional_permissions.sandbox_permissions,
                         effective_additional_permissions.additional_permissions,

@@ -2376,6 +2376,79 @@ pub struct TurnContextNetworkItem {
     pub denied_domains: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnContextRequestUserInputPolicy {
+    pub tool_enabled: bool,
+    pub available: bool,
+    pub default_mode_enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_modes: Vec<ModeKind>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnContextToolPolicy {
+    pub request_user_input: TurnContextRequestUserInputPolicy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Display, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum InstructionAudience {
+    Developer,
+    ContextualUser,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Display, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum InstructionPriority {
+    System,
+    Developer,
+    Mode,
+    Repo,
+    Skill,
+    User,
+    Runtime,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Display, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum InstructionSource {
+    ModelSwitch,
+    PlatformPolicy,
+    DeveloperOverride,
+    MemoryTool,
+    CollaborationMode,
+    RealtimeContext,
+    Personality,
+    Apps,
+    CommitMessage,
+    UserConfig,
+    ProjectDoc,
+    JsRepl,
+    Plugins,
+    CodeMode,
+    Skills,
+    ChildAgents,
+    EnvironmentContext,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct InstructionSection {
+    pub audience: InstructionAudience,
+    pub priority: InstructionPriority,
+    pub source: InstructionSource,
+    pub text: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+pub struct ResolvedInstructionLayers {
+    pub base_instructions: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<InstructionSection>,
+}
+
 /// Persist once per real user turn after computing that turn's model-visible
 /// context updates, and again after mid-turn compaction when replacement
 /// history re-establishes full context, so resume/fork replay can recover the
@@ -2407,8 +2480,14 @@ pub struct TurnContextItem {
     pub summary: ReasoningSummaryConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_instruction_sections: Vec<InstructionSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_instruction_layers: Option<ResolvedInstructionLayers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<TurnContextToolPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_output_json_schema: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4142,6 +4221,9 @@ mod tests {
 
         assert_eq!(item.trace_id, None);
         assert_eq!(item.network, None);
+        assert_eq!(item.user_instruction_sections, Vec::new());
+        assert_eq!(item.resolved_instruction_layers, None);
+        assert_eq!(item.tool_policy, None);
         Ok(())
     }
 
@@ -4166,7 +4248,10 @@ mod tests {
             effort: None,
             summary: ReasoningSummaryConfig::Auto,
             user_instructions: None,
+            user_instruction_sections: Vec::new(),
             developer_instructions: None,
+            resolved_instruction_layers: None,
+            tool_policy: None,
             final_output_json_schema: None,
             truncation_policy: None,
         };

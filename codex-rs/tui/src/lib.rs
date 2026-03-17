@@ -41,6 +41,7 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::TurnContextItem;
 use codex_state::log_db;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_oss::ensure_oss_provider_ready;
@@ -989,8 +990,7 @@ pub(crate) async fn read_session_cwd(
     }
 }
 
-async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
+pub(crate) fn parse_latest_turn_context_from_rollout_text(text: &str) -> Option<TurnContextItem> {
     for line in text.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1000,10 +1000,19 @@ async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
             continue;
         };
         if let RolloutItem::TurnContext(item) = rollout_line.item {
-            return Some(item.cwd);
+            return Some(item);
         }
     }
     None
+}
+
+async fn parse_latest_turn_context(path: &Path) -> Option<TurnContextItem> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    parse_latest_turn_context_from_rollout_text(&text)
+}
+
+async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
+    parse_latest_turn_context(path).await.map(|item| item.cwd)
 }
 
 pub(crate) fn cwds_differ(current_cwd: &Path, session_cwd: &Path) -> bool {
@@ -1277,7 +1286,10 @@ mod tests {
                 .model_reasoning_summary
                 .unwrap_or(codex_protocol::config_types::ReasoningSummary::Auto),
             user_instructions: None,
+            user_instruction_sections: Vec::new(),
             developer_instructions: None,
+            resolved_instruction_layers: None,
+            tool_policy: None,
             final_output_json_schema: None,
             truncation_policy: None,
         }

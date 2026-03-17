@@ -73,12 +73,22 @@ pub(crate) fn streams_proposed_plan(mask: &CollaborationModeMask) -> bool {
     metadata_for_mask(mask).streams_proposed_plan
 }
 
+fn mask_from_metadata(metadata: &CollaborationModeMetadata) -> CollaborationModeMask {
+    CollaborationModeMask {
+        name: metadata.name.clone(),
+        mode: metadata.mode,
+        model: metadata.model.clone(),
+        reasoning_effort: metadata.reasoning_effort,
+        developer_instructions: None,
+    }
+}
+
 fn filtered_presets(models_manager: &ModelsManager) -> Vec<TuiCollaborationModePreset> {
     models_manager
-        .list_collaboration_modes()
+        .list_collaboration_mode_metadata()
         .into_iter()
-        .map(|mask| {
-            let metadata = metadata_for_mask(&mask);
+        .map(|metadata| {
+            let mask = mask_from_metadata(&metadata);
             TuiCollaborationModePreset { mask, metadata }
         })
         .filter(|preset| preset.metadata.tui_visible)
@@ -202,5 +212,21 @@ mod tests {
         assert!(streams_proposed_plan(&plan));
         assert!(!requires_proposed_plan_block(&default));
         assert!(!streams_proposed_plan(&default));
+    }
+
+    #[test]
+    fn mask_from_metadata_preserves_identity_fields() {
+        let preset = preset(
+            "Default Fast",
+            ModeKind::Default,
+            Some("gpt-5.1-codex-mini"),
+        );
+        let restored = mask_from_metadata(&preset.metadata);
+
+        assert_eq!(restored.name, preset.mask.name);
+        assert_eq!(restored.mode, preset.mask.mode);
+        assert_eq!(restored.model, preset.mask.model);
+        assert_eq!(restored.reasoning_effort, preset.mask.reasoning_effort);
+        assert_eq!(restored.developer_instructions, None);
     }
 }

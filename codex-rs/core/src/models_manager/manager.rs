@@ -9,10 +9,12 @@ use crate::error::CodexErr;
 use crate::error::Result as CoreResult;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use crate::models_manager::collaboration_mode_presets::builtin_collaboration_mode_metadata;
 use crate::models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use crate::models_manager::model_info;
 use codex_api::ModelsClient;
 use codex_api::ReqwestTransport;
+use codex_app_server_protocol::CollaborationModeMask as CollaborationModeMetadata;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
@@ -127,6 +129,17 @@ impl ModelsManager {
         collaboration_modes_config: CollaborationModesConfig,
     ) -> Vec<CollaborationModeMask> {
         builtin_collaboration_mode_presets(collaboration_modes_config)
+    }
+
+    pub fn list_collaboration_mode_metadata(&self) -> Vec<CollaborationModeMetadata> {
+        self.list_collaboration_mode_metadata_for_config(self.collaboration_modes_config)
+    }
+
+    pub fn list_collaboration_mode_metadata_for_config(
+        &self,
+        collaboration_modes_config: CollaborationModesConfig,
+    ) -> Vec<CollaborationModeMetadata> {
+        builtin_collaboration_mode_metadata(collaboration_modes_config)
     }
 
     /// Attempt to list models without blocking, using the current cached state.

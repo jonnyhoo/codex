@@ -1,4 +1,5 @@
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::TUI_VISIBLE_COLLABORATION_MODES;
 use rmcp::model::ToolAnnotations;
 use serde::Deserialize;
 
@@ -45,8 +46,10 @@ impl RuntimeCollaborationToolPolicyContext {
             allows_repo_mutation: mode_kind.allows_repo_mutation(),
             update_plan_available: mode_kind.update_plan_available(),
             request_user_input_available: tools_config.request_user_input
-                && mode_kind
-                    .request_user_input_available(tools_config.default_mode_request_user_input),
+                && request_user_input_is_available(
+                    mode_kind,
+                    tools_config.default_mode_request_user_input,
+                ),
             requires_proposed_plan_block: mode_kind.requires_proposed_plan_block(),
             streams_proposed_plan: mode_kind.streams_proposed_plan(),
         }
@@ -65,6 +68,15 @@ pub(crate) struct RuntimeCodexAppsPolicyContext {
 pub(crate) struct RuntimeToolPolicyContext {
     pub collaboration: RuntimeCollaborationToolPolicyContext,
     pub codex_apps: RuntimeCodexAppsPolicyContext,
+    pub request_user_input: RuntimeRequestUserInputPolicy,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeRequestUserInputPolicy {
+    pub tool_enabled: bool,
+    pub available: bool,
+    pub default_mode_enabled: bool,
+    pub allowed_modes: Vec<ModeKind>,
 }
 
 pub(crate) fn runtime_tool_policy(
@@ -72,12 +84,67 @@ pub(crate) fn runtime_tool_policy(
     mode_kind: ModeKind,
     tools_config: &ToolsConfig,
 ) -> RuntimeToolPolicyContext {
+    let request_user_input = RuntimeRequestUserInputPolicy::from_tools_config(mode_kind, tools_config);
     RuntimeToolPolicyContext {
         collaboration: RuntimeCollaborationToolPolicyContext::from_mode_and_tools(
             mode_kind,
             tools_config,
         ),
         codex_apps: runtime_codex_apps_policy(config),
+        request_user_input,
+    }
+}
+
+impl RuntimeRequestUserInputPolicy {
+    pub(crate) fn from_tools_config(mode_kind: ModeKind, tools_config: &ToolsConfig) -> Self {
+        let default_mode_enabled = tools_config.default_mode_request_user_input;
+        let allowed_modes = request_user_input_allowed_modes(default_mode_enabled);
+        Self {
+            tool_enabled: tools_config.request_user_input,
+            available: tools_config.request_user_input
+                && request_user_input_is_available(mode_kind, default_mode_enabled),
+            default_mode_enabled,
+            allowed_modes,
+        }
+    }
+
+    pub(crate) fn unavailable_message(&self, mode_kind: ModeKind) -> Option<String> {
+        if self.available {
+            None
+        } else {
+            Some(format!(
+                "request_user_input is unavailable in {} mode",
+                mode_kind.display_name()
+            ))
+        }
+    }
+}
+
+pub(crate) fn request_user_input_is_available(
+    mode_kind: ModeKind,
+    default_mode_enabled: bool,
+) -> bool {
+    mode_kind.request_user_input_available(default_mode_enabled)
+}
+
+pub(crate) fn request_user_input_allowed_modes(default_mode_enabled: bool) -> Vec<ModeKind> {
+    TUI_VISIBLE_COLLABORATION_MODES
+        .into_iter()
+        .filter(|mode_kind| request_user_input_is_available(*mode_kind, default_mode_enabled))
+        .collect()
+}
+
+pub(crate) fn request_user_input_allowed_modes_message(default_mode_enabled: bool) -> String {
+    let mode_names: Vec<&str> = request_user_input_allowed_modes(default_mode_enabled)
+        .into_iter()
+        .map(ModeKind::display_name)
+        .collect();
+
+    match mode_names.as_slice() {
+        [] => "no modes".to_string(),
+        [mode_name] => format!("{mode_name} mode"),
+        [first, second] => format!("{first} or {second} mode"),
+        [..] => format!("modes: {}", mode_names.join(",")),
     }
 }
 

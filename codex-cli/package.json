@@ -1,6 +1,6 @@
 {
   "name": "@jonnyhoo/codex",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "Apache-2.0",
   "bin": {
     "codex": "bin/codex.js"
@@ -8,6 +8,9 @@
   "type": "module",
   "engines": {
     "node": ">=16"
+  },
+  "scripts": {
+    "stage-release": "node ./scripts/stage-release.mjs"
   },
   "files": [
     "bin",

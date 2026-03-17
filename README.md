@@ -52,7 +52,7 @@ You can also use Codex with an API key, but this requires [additional setup](htt
 
 ## Fork-specific notes
 
-- Current fork release target is `0.3.0`, rebased onto upstream `rust-v0.114.0`.
+- Current fork release target is `0.3.1`, rebased onto upstream `rust-v0.114.0`.
 - This fork publishes the npm package as `@jonnyhoo/codex`.
 - It adds built-in LSP tooling, first-class `write_file` and `edit_file` tools, and TUI visibility for provider health and status.
 - It also tightens broad repo search defaults by preferring `grep_files` and skipping common generated or dependency directories unless explicitly requested.

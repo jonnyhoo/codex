@@ -383,6 +383,13 @@ def stage_sources(
             package_json["name"] = codex_npm_name
             if repository is not None:
                 package_json["repository"] = repository
+            scripts = package_json.get("scripts")
+            if isinstance(scripts, dict) and "stage-release" in scripts:
+                scripts = {key: value for key, value in scripts.items() if key != "stage-release"}
+                if scripts:
+                    package_json["scripts"] = scripts
+                else:
+                    package_json.pop("scripts", None)
 
     if package == "codex":
         package_json["files"] = ["bin"]

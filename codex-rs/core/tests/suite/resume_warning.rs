@@ -43,7 +43,10 @@ fn resume_history(
             .model_reasoning_summary
             .unwrap_or(ReasoningSummary::Auto),
         user_instructions: None,
+        user_instruction_sections: Vec::new(),
         developer_instructions: None,
+        resolved_instruction_layers: None,
+        tool_policy: None,
         final_output_json_schema: None,
         truncation_policy: None,
     };

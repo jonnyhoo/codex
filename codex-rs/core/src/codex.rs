@@ -92,9 +92,14 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
+use codex_protocol::protocol::InstructionAudience as ProtocolInstructionAudience;
+use codex_protocol::protocol::InstructionPriority as ProtocolInstructionPriority;
+use codex_protocol::protocol::InstructionSection as ProtocolInstructionSection;
+use codex_protocol::protocol::InstructionSource as ProtocolInstructionSource;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::RawResponseItemEvent;
+use codex_protocol::protocol::ResolvedInstructionLayers as ProtocolResolvedInstructionLayers;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
@@ -102,6 +107,8 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnContextNetworkItem;
+use codex_protocol::protocol::TurnContextRequestUserInputPolicy as ProtocolTurnContextRequestUserInputPolicy;
+use codex_protocol::protocol::TurnContextToolPolicy as ProtocolTurnContextToolPolicy;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionsArgs;
@@ -940,7 +947,10 @@ impl TurnContext {
             effort: self.reasoning_effort,
             summary: self.reasoning_summary,
             user_instructions: self.user_instructions.clone(),
+            user_instruction_sections: Vec::new(),
             developer_instructions: self.developer_instructions.clone(),
+            resolved_instruction_layers: None,
+            tool_policy: None,
             final_output_json_schema: self.final_output_json_schema.clone(),
             truncation_policy: Some(self.truncation_policy.into()),
         }
@@ -985,6 +995,82 @@ fn runtime_agent_context(
         agent_nickname: session_source.get_nickname(),
         agent_role: session_source.get_agent_role(),
         subagents: Vec::new(),
+    }
+}
+
+fn protocol_instruction_audience(audience: InstructionAudience) -> ProtocolInstructionAudience {
+    match audience {
+        InstructionAudience::Developer => ProtocolInstructionAudience::Developer,
+        InstructionAudience::ContextualUser => ProtocolInstructionAudience::ContextualUser,
+    }
+}
+
+fn protocol_instruction_priority(priority: InstructionPriority) -> ProtocolInstructionPriority {
+    match priority {
+        InstructionPriority::System => ProtocolInstructionPriority::System,
+        InstructionPriority::Developer => ProtocolInstructionPriority::Developer,
+        InstructionPriority::Mode => ProtocolInstructionPriority::Mode,
+        InstructionPriority::Repo => ProtocolInstructionPriority::Repo,
+        InstructionPriority::Skill => ProtocolInstructionPriority::Skill,
+        InstructionPriority::User => ProtocolInstructionPriority::User,
+        InstructionPriority::Runtime => ProtocolInstructionPriority::Runtime,
+    }
+}
+
+fn protocol_instruction_source(source: InstructionSource) -> ProtocolInstructionSource {
+    match source {
+        InstructionSource::ModelSwitch => ProtocolInstructionSource::ModelSwitch,
+        InstructionSource::PlatformPolicy => ProtocolInstructionSource::PlatformPolicy,
+        InstructionSource::DeveloperOverride => ProtocolInstructionSource::DeveloperOverride,
+        InstructionSource::MemoryTool => ProtocolInstructionSource::MemoryTool,
+        InstructionSource::CollaborationMode => ProtocolInstructionSource::CollaborationMode,
+        InstructionSource::RealtimeContext => ProtocolInstructionSource::RealtimeContext,
+        InstructionSource::Personality => ProtocolInstructionSource::Personality,
+        InstructionSource::Apps => ProtocolInstructionSource::Apps,
+        InstructionSource::CommitMessage => ProtocolInstructionSource::CommitMessage,
+        InstructionSource::UserConfig => ProtocolInstructionSource::UserConfig,
+        InstructionSource::ProjectDoc => ProtocolInstructionSource::ProjectDoc,
+        InstructionSource::JsRepl => ProtocolInstructionSource::JsRepl,
+        InstructionSource::Plugins => ProtocolInstructionSource::Plugins,
+        InstructionSource::CodeMode => ProtocolInstructionSource::CodeMode,
+        InstructionSource::Skills => ProtocolInstructionSource::Skills,
+        InstructionSource::ChildAgents => ProtocolInstructionSource::ChildAgents,
+        InstructionSource::EnvironmentContext => ProtocolInstructionSource::EnvironmentContext,
+    }
+}
+
+fn protocol_instruction_section(section: &InstructionSection) -> ProtocolInstructionSection {
+    ProtocolInstructionSection {
+        audience: protocol_instruction_audience(section.audience),
+        priority: protocol_instruction_priority(section.priority),
+        source: protocol_instruction_source(section.source),
+        text: section.text.clone(),
+    }
+}
+
+fn protocol_resolved_instruction_layers(
+    resolved_layers: &ResolvedInstructionLayers,
+) -> ProtocolResolvedInstructionLayers {
+    ProtocolResolvedInstructionLayers {
+        base_instructions: resolved_layers.base_instructions.clone(),
+        sections: resolved_layers
+            .sections
+            .iter()
+            .map(protocol_instruction_section)
+            .collect(),
+    }
+}
+
+fn protocol_turn_context_tool_policy(
+    tool_policy: &RuntimeToolPolicyContext,
+) -> ProtocolTurnContextToolPolicy {
+    ProtocolTurnContextToolPolicy {
+        request_user_input: ProtocolTurnContextRequestUserInputPolicy {
+            tool_enabled: tool_policy.request_user_input.tool_enabled,
+            available: tool_policy.request_user_input.available,
+            default_mode_enabled: tool_policy.request_user_input.default_mode_enabled,
+            allowed_modes: tool_policy.request_user_input.allowed_modes.clone(),
+        },
     }
 }
 
@@ -2052,9 +2138,10 @@ impl Session {
                 // we do not emit model-visible "diff" updates before the first user message.
                 let items = self.build_initial_context(&turn_context).await;
                 self.record_conversation_items(&turn_context, &items).await;
+                let turn_context_item = self.build_turn_context_item(&turn_context).await;
                 {
                     let mut state = self.state.lock().await;
-                    state.set_reference_context_item(Some(turn_context.to_turn_context_item()));
+                    state.set_reference_context_item(Some(turn_context_item));
                 }
                 self.set_previous_turn_settings(None).await;
                 // Ensure initial items are visible to immediate readers (e.g., tests, forks).
@@ -2165,9 +2252,10 @@ impl Session {
                 let initial_context = self.build_initial_context(&turn_context).await;
                 self.record_conversation_items(&turn_context, &initial_context)
                     .await;
+                let turn_context_item = self.build_turn_context_item(&turn_context).await;
                 {
                     let mut state = self.state.lock().await;
-                    state.set_reference_context_item(Some(turn_context.to_turn_context_item()));
+                    state.set_reference_context_item(Some(turn_context_item));
                 }
 
                 // Forked threads should remain file-backed immediately after startup.
@@ -3463,6 +3551,24 @@ impl Session {
         }
     }
 
+    pub(crate) async fn build_turn_context_item(
+        &self,
+        turn_context: &TurnContext,
+    ) -> TurnContextItem {
+        let resolved_layers = self.resolve_instruction_layers(turn_context).await;
+        let tool_policy = turn_context.runtime_tool_policy();
+        let mut item = turn_context.to_turn_context_item();
+        item.user_instruction_sections = turn_context
+            .user_instruction_sections
+            .iter()
+            .map(protocol_instruction_section)
+            .collect();
+        item.resolved_instruction_layers =
+            Some(protocol_resolved_instruction_layers(&resolved_layers));
+        item.tool_policy = Some(protocol_turn_context_tool_policy(&tool_policy));
+        item
+    }
+
     pub(crate) async fn build_initial_context(
         &self,
         turn_context: &TurnContext,
@@ -3766,7 +3872,7 @@ impl Session {
             self.build_settings_update_items(reference_context_item.as_ref(), turn_context)
                 .await
         };
-        let turn_context_item = turn_context.to_turn_context_item();
+        let turn_context_item = self.build_turn_context_item(turn_context).await;
         if !context_items.is_empty() {
             self.record_conversation_items(turn_context, &context_items)
                 .await;

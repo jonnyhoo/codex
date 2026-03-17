@@ -655,28 +655,37 @@ The **DCO check** blocks merges until every commit in the PR carries the footer 
 
 ### Releasing `codex`
 
-To publish a new version of the CLI you first need to stage the npm package. A
-helper script in `codex-cli/scripts/` does all the heavy lifting. Inside the
-`codex-cli` folder run:
+The npm release version comes from `codex-cli/package.json`. Bump that version
+first, update `CHANGELOG.md`, and then stage tarballs from the `codex-cli`
+folder:
 
 ```bash
-# Classic, JS implementation that includes small, native binaries for Linux sandboxing.
-pnpm stage-release
+# Recommended for this fork: point at a prepared vendor root.
+pnpm stage-release -- --vendor-src /path/to/vendor
 
-# Optionally specify the temp directory to reuse between runs.
-RELEASE_DIR=$(mktemp -d)
-pnpm stage-release --tmp "$RELEASE_DIR"
-
-# "Fat" package that additionally bundles the native Rust CLI binaries for
-# Linux. End-users can then opt-in at runtime by setting CODEX_RUST=1.
-pnpm stage-release --native
+# Or fetch native artifacts from a specific upstream workflow run.
+pnpm stage-release -- --workflow-url https://github.com/openai/codex/actions/runs/1234567890
 ```
 
-Go to the folder where the release is staged and verify that it works as intended. If so, run the following from the temp folder:
+This wrapper calls the repo-root npm staging helper and writes tarballs to
+`dist/npm/`. For fork releases such as `@jonnyhoo/codex`, pass either
+`--vendor-src` or `--workflow-url`; the automatic `rust-v<version>` lookup only
+works when the npm version matches upstream release tags.
 
+To stage only selected platform package(s), pass `--platform-package`:
+
+```bash
+pnpm stage-release -- \
+  --vendor-src /path/to/vendor \
+  --platform-package codex-win32-x64
 ```
-cd "$RELEASE_DIR"
-npm publish
+
+Review the generated tarballs in `dist/npm/`, then publish platform tarballs
+first and the meta package last:
+
+```bash
+npm publish dist/npm/codex-npm-win32-x64-0.3.1.tgz --tag win32-x64
+npm publish dist/npm/codex-npm-0.3.1.tgz
 ```
 
 ### Alternative build options

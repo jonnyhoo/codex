@@ -1,4 +1,5 @@
 use crate::history_cell::PlainHistoryCell;
+use crate::parse_latest_turn_context_from_rollout_text;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_core::config::Config;
 use codex_core::config_loader::ConfigLayerEntry;
@@ -9,16 +10,23 @@ use codex_core::config_loader::RequirementSource;
 use codex_core::config_loader::ResidencyRequirement;
 use codex_core::config_loader::SandboxModeRequirement;
 use codex_core::config_loader::WebSearchModeRequirement;
+use codex_protocol::protocol::InstructionSection;
+use codex_protocol::protocol::ResolvedInstructionLayers;
 use codex_protocol::protocol::SessionNetworkProxyRuntime;
+use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::protocol::TurnContextToolPolicy;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use std::path::Path;
 use toml::Value as TomlValue;
 
 pub(crate) fn new_debug_config_output(
     config: &Config,
     session_network_proxy: Option<&SessionNetworkProxyRuntime>,
+    rollout_path: Option<&Path>,
 ) -> PlainHistoryCell {
     let mut lines = render_debug_config_lines(&config.config_layer_stack);
+    lines.extend(render_turn_context_snapshot_lines(rollout_path));
 
     if let Some(proxy) = session_network_proxy {
         lines.push("".into());
@@ -46,6 +54,156 @@ pub(crate) fn new_debug_config_output(
 
 pub(crate) fn new_debug_runtime_output(text: &str) -> PlainHistoryCell {
     PlainHistoryCell::new(text.lines().map(|line| line.to_string().into()).collect())
+}
+
+fn render_turn_context_snapshot_lines(rollout_path: Option<&Path>) -> Vec<Line<'static>> {
+    let Some(rollout_path) = rollout_path else {
+        return Vec::new();
+    };
+
+    let mut lines = vec!["".into(), "Latest persisted turn context:".bold().into()];
+    lines.push(format!("  - rollout_path: {}", rollout_path.display()).into());
+
+    let snapshot = std::fs::read_to_string(rollout_path)
+        .ok()
+        .and_then(|text| parse_latest_turn_context_from_rollout_text(&text));
+    let Some(snapshot) = snapshot else {
+        lines.push("  - snapshot: <unavailable>".dim().into());
+        return lines;
+    };
+
+    lines.extend(render_turn_context_summary_lines(&snapshot));
+    lines
+}
+
+fn render_turn_context_summary_lines(snapshot: &TurnContextItem) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let turn_id = snapshot.turn_id.as_deref().unwrap_or("<none>");
+    lines.push(format!("  - turn_id: {turn_id}").into());
+    lines.push(format!("  - model: {}", snapshot.model).into());
+    if let Some(collaboration_mode) = snapshot.collaboration_mode.as_ref() {
+        lines.push(
+            format!(
+                "  - collaboration_mode: {}",
+                collaboration_mode.mode.display_name()
+            )
+            .into(),
+        );
+    }
+    if let Some(realtime_active) = snapshot.realtime_active {
+        lines.push(format!("  - realtime_active: {realtime_active}").into());
+    }
+    if let Some(tool_policy) = snapshot.tool_policy.as_ref() {
+        lines.extend(render_turn_context_tool_policy(tool_policy));
+    }
+
+    lines.push(
+        format!(
+            "  - user_instruction_sections: {}",
+            snapshot.user_instruction_sections.len()
+        )
+        .into(),
+    );
+    if !snapshot.user_instruction_sections.is_empty() {
+        lines.extend(render_instruction_sections(
+            "    ",
+            snapshot.user_instruction_sections.as_slice(),
+        ));
+    }
+
+    match snapshot.resolved_instruction_layers.as_ref() {
+        Some(resolved_layers) => {
+            lines.extend(render_resolved_instruction_layers(resolved_layers));
+        }
+        None => {
+            lines.push(
+                "  - resolved_instruction_layers: <unavailable>"
+                    .dim()
+                    .into(),
+            );
+        }
+    }
+
+    lines
+}
+
+fn render_turn_context_tool_policy(tool_policy: &TurnContextToolPolicy) -> Vec<Line<'static>> {
+    let request_user_input = &tool_policy.request_user_input;
+    let allowed_modes = join_or_empty(
+        request_user_input
+            .allowed_modes
+            .iter()
+            .map(|mode_kind| mode_kind.display_name().to_string())
+            .collect(),
+    );
+
+    vec![
+        "  - tool_policy.request_user_input:".into(),
+        format!("    - tool_enabled: {}", request_user_input.tool_enabled).into(),
+        format!("    - available: {}", request_user_input.available).into(),
+        format!(
+            "    - default_mode_enabled: {}",
+            request_user_input.default_mode_enabled
+        )
+        .into(),
+        format!("    - allowed_modes: {allowed_modes}").into(),
+    ]
+}
+
+fn render_resolved_instruction_layers(
+    resolved_layers: &ResolvedInstructionLayers,
+) -> Vec<Line<'static>> {
+    let mut lines = vec!["  - resolved_instruction_layers:".into()];
+    lines.push("    - base_instructions:".into());
+    lines.extend(render_text_block(
+        "      ",
+        resolved_layers.base_instructions.as_str(),
+    ));
+    lines.push(format!("    - sections: {}", resolved_layers.sections.len()).into());
+    if resolved_layers.sections.is_empty() {
+        lines.push("      <none>".dim().into());
+    } else {
+        lines.extend(render_instruction_sections(
+            "      ",
+            resolved_layers.sections.as_slice(),
+        ));
+    }
+    lines
+}
+
+fn render_instruction_sections(
+    indent: &str,
+    sections: &[InstructionSection],
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (index, section) in sections.iter().enumerate() {
+        lines.push(
+            format!(
+                "{indent}{}. audience={} priority={} source={}",
+                index + 1,
+                section.audience,
+                section.priority,
+                section.source
+            )
+            .into(),
+        );
+        lines.extend(render_text_block(
+            &format!("{indent}   "),
+            section.text.as_str(),
+        ));
+    }
+    lines
+}
+
+fn render_text_block(indent: &str, text: &str) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return vec![format!("{indent}<empty>").dim().into()];
+    }
+
+    text.lines()
+        .map(|line| format!("{indent}{line}").into())
+        .collect()
 }
 
 fn session_all_proxy_url(http_addr: &str, socks_addr: &str, socks_enabled: bool) -> String {
@@ -390,6 +548,7 @@ fn format_network_constraints(network: &NetworkConstraints) -> String {
 #[cfg(test)]
 mod tests {
     use super::render_debug_config_lines;
+    use super::render_turn_context_snapshot_lines;
     use super::session_all_proxy_url;
     use codex_app_server_protocol::ConfigLayerSource;
     use codex_core::config::Constrained;
@@ -406,12 +565,24 @@ mod tests {
     use codex_core::config_loader::SandboxModeRequirement;
     use codex_core::config_loader::Sourced;
     use codex_core::config_loader::WebSearchModeRequirement;
+    use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
     use codex_protocol::config_types::WebSearchMode;
     use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::InstructionAudience;
+    use codex_protocol::protocol::InstructionPriority;
+    use codex_protocol::protocol::InstructionSection;
+    use codex_protocol::protocol::InstructionSource;
+    use codex_protocol::protocol::ResolvedInstructionLayers;
+    use codex_protocol::protocol::RolloutItem;
+    use codex_protocol::protocol::RolloutLine;
     use codex_protocol::protocol::SandboxPolicy;
+    use codex_protocol::protocol::TurnContextItem;
+    use codex_protocol::protocol::TurnContextRequestUserInputPolicy;
+    use codex_protocol::protocol::TurnContextToolPolicy;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use ratatui::text::Line;
     use std::collections::BTreeMap;
+    use tempfile::NamedTempFile;
     use toml::Value as TomlValue;
 
     fn empty_toml_table() -> TomlValue {
@@ -685,5 +856,81 @@ approval_policy = "never"
             session_all_proxy_url("127.0.0.1:3128", "127.0.0.1:8081", false),
             "http://127.0.0.1:3128".to_string()
         );
+    }
+
+    #[test]
+    fn debug_config_output_reads_latest_turn_context_instruction_snapshot() {
+        let rollout_file = NamedTempFile::new().expect("temp rollout");
+        let rollout_line = RolloutLine {
+            timestamp: "t0".to_string(),
+            item: RolloutItem::TurnContext(TurnContextItem {
+                turn_id: Some("turn-1".to_string()),
+                trace_id: None,
+                cwd: std::env::temp_dir(),
+                current_date: None,
+                timezone: None,
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                network: None,
+                model: "gpt-5".to_string(),
+                personality: None,
+                collaboration_mode: None,
+                realtime_active: Some(false),
+                effort: None,
+                summary: ReasoningSummaryConfig::Auto,
+                user_instructions: Some("repo instructions".to_string()),
+                user_instruction_sections: vec![InstructionSection {
+                    audience: InstructionAudience::ContextualUser,
+                    priority: InstructionPriority::Repo,
+                    source: InstructionSource::ProjectDoc,
+                    text: "repo instructions".to_string(),
+                }],
+                developer_instructions: Some("developer override".to_string()),
+                resolved_instruction_layers: Some(ResolvedInstructionLayers {
+                    base_instructions: "base instructions".to_string(),
+                    sections: vec![InstructionSection {
+                        audience: InstructionAudience::Developer,
+                        priority: InstructionPriority::Developer,
+                        source: InstructionSource::DeveloperOverride,
+                        text: "developer override".to_string(),
+                    }],
+                }),
+                tool_policy: Some(TurnContextToolPolicy {
+                    request_user_input: TurnContextRequestUserInputPolicy {
+                        tool_enabled: true,
+                        available: false,
+                        default_mode_enabled: false,
+                        allowed_modes: vec![codex_protocol::config_types::ModeKind::Plan],
+                    },
+                }),
+                final_output_json_schema: None,
+                truncation_policy: None,
+            }),
+        };
+        std::fs::write(
+            rollout_file.path(),
+            format!(
+                "{}\n",
+                serde_json::to_string(&rollout_line).expect("serialize rollout")
+            ),
+        )
+        .expect("write rollout");
+
+        let rendered = render_to_text(&render_turn_context_snapshot_lines(Some(
+            rollout_file.path(),
+        )));
+        assert!(rendered.contains("Latest persisted turn context:"));
+        assert!(rendered.contains("turn_id: turn-1"));
+        assert!(rendered.contains("model: gpt-5"));
+        assert!(rendered.contains("tool_policy.request_user_input:"));
+        assert!(rendered.contains("tool_enabled: true"));
+        assert!(rendered.contains("available: false"));
+        assert!(rendered.contains("allowed_modes: Plan"));
+        assert!(rendered.contains("user_instruction_sections: 1"));
+        assert!(rendered.contains("audience=contextual_user priority=repo source=project_doc"));
+        assert!(rendered.contains("repo instructions"));
+        assert!(rendered.contains("base_instructions:"));
+        assert!(rendered.contains("base instructions"));
+        assert!(rendered.contains("developer override"));
     }
 }

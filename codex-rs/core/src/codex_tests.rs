@@ -1002,7 +1002,10 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         effort: turn_context.reasoning_effort,
         summary: turn_context.reasoning_summary,
         user_instructions: None,
+        user_instruction_sections: Vec::new(),
         developer_instructions: None,
+        resolved_instruction_layers: None,
+        tool_policy: None,
         final_output_json_schema: None,
         truncation_policy: Some(turn_context.truncation_policy.into()),
     };
@@ -2990,6 +2993,19 @@ async fn turn_context_runtime_context_mirrors_turn_state() {
         turn_context.truncation_policy
     );
     assert_eq!(runtime.tools.tools_config, turn_context.tools_config);
+    assert_eq!(
+        runtime.tools.policy.request_user_input.tool_enabled,
+        turn_context.tools_config.request_user_input
+    );
+    assert_eq!(runtime.tools.policy.request_user_input.available, false,);
+    assert_eq!(
+        runtime.tools.policy.request_user_input.default_mode_enabled,
+        turn_context.tools_config.default_mode_request_user_input
+    );
+    assert_eq!(
+        runtime.tools.policy.request_user_input.allowed_modes,
+        vec![ModeKind::Plan]
+    );
 }
 
 #[tokio::test]
@@ -3207,6 +3223,59 @@ async fn build_debug_runtime_text_includes_resolved_layers() {
     assert!(
         text.contains("tool_policy"),
         "expected tool policy in debug runtime output, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn build_turn_context_item_includes_instruction_snapshots() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.developer_instructions = Some("developer override".to_string());
+    turn_context.user_instruction_sections = vec![InstructionSection::new(
+        InstructionAudience::ContextualUser,
+        InstructionPriority::Repo,
+        InstructionSource::ProjectDoc,
+        "repo instructions",
+    )];
+    turn_context.user_instructions =
+        crate::project_doc::join_user_instruction_sections(&turn_context.user_instruction_sections);
+
+    let turn_context_item = session.build_turn_context_item(&turn_context).await;
+
+    assert_eq!(turn_context_item.turn_id, Some(turn_context.sub_id.clone()));
+    assert_eq!(turn_context_item.user_instruction_sections.len(), 1);
+    assert_eq!(
+        turn_context_item.user_instruction_sections[0]
+            .source
+            .to_string(),
+        "project_doc"
+    );
+    assert_eq!(
+        turn_context_item.user_instruction_sections[0].text,
+        "repo instructions"
+    );
+    let resolved_layers = turn_context_item
+        .resolved_instruction_layers
+        .expect("turn context item should include resolved instruction layers");
+    assert_eq!(
+        resolved_layers.base_instructions,
+        session.get_base_instructions().await.text
+    );
+    assert!(resolved_layers.sections.iter().any(|section| {
+        section.source.to_string() == "developer_override"
+            && section.text.contains("developer override")
+    }));
+    assert!(resolved_layers.sections.iter().any(|section| {
+        section.source.to_string() == "project_doc" && section.text.contains("repo instructions")
+    }));
+    let tool_policy = turn_context_item
+        .tool_policy
+        .expect("turn context item should include tool policy");
+    assert!(tool_policy.request_user_input.tool_enabled);
+    assert!(!tool_policy.request_user_input.available);
+    assert!(!tool_policy.request_user_input.default_mode_enabled);
+    assert_eq!(
+        tool_policy.request_user_input.allowed_modes,
+        vec![ModeKind::Plan]
     );
 }
 
@@ -3569,7 +3638,7 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
     let current_context = session.reference_context_item().await;
     assert_eq!(
         serde_json::to_value(current_context).expect("serialize current context item"),
-        serde_json::to_value(Some(turn_context.to_turn_context_item()))
+        serde_json::to_value(Some(session.build_turn_context_item(&turn_context).await))
             .expect("serialize expected context item")
     );
 }
@@ -3666,7 +3735,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
     assert_eq!(
         serde_json::to_value(session.reference_context_item().await)
             .expect("serialize current context item"),
-        serde_json::to_value(Some(turn_context.to_turn_context_item()))
+        serde_json::to_value(Some(session.build_turn_context_item(&turn_context).await))
             .expect("serialize expected context item")
     );
     session.ensure_rollout_materialized().await;
@@ -3685,7 +3754,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
     assert_eq!(
         serde_json::to_value(persisted_turn_context)
             .expect("serialize persisted turn context item"),
-        serde_json::to_value(Some(turn_context.to_turn_context_item()))
+        serde_json::to_value(Some(session.build_turn_context_item(&turn_context).await))
             .expect("serialize expected turn context item")
     );
 }
@@ -3788,7 +3857,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_full_rei
     assert_eq!(
         serde_json::to_value(persisted_turn_context)
             .expect("serialize persisted turn context item"),
-        serde_json::to_value(Some(turn_context.to_turn_context_item()))
+        serde_json::to_value(Some(session.build_turn_context_item(&turn_context).await))
             .expect("serialize expected turn context item")
     );
 }

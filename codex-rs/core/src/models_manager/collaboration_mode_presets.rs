@@ -1,3 +1,5 @@
+use crate::request_user_input_is_available;
+use codex_app_server_protocol::CollaborationModeMask as CollaborationModeMetadata;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::TUI_VISIBLE_COLLABORATION_MODES;
@@ -25,6 +27,24 @@ pub(crate) fn builtin_collaboration_mode_presets(
     collaboration_modes_config: CollaborationModesConfig,
 ) -> Vec<CollaborationModeMask> {
     vec![plan_preset(), default_preset(collaboration_modes_config)]
+}
+
+pub(crate) fn builtin_collaboration_mode_metadata(
+    collaboration_modes_config: CollaborationModesConfig,
+) -> Vec<CollaborationModeMetadata> {
+    builtin_collaboration_mode_presets(collaboration_modes_config)
+        .into_iter()
+        .map(|preset| {
+            let request_user_input_available = collaboration_mode_request_user_input_available(
+                preset.mode,
+                collaboration_modes_config,
+            );
+            CollaborationModeMetadata::from_core_with_request_user_input_available(
+                preset,
+                request_user_input_available,
+            )
+        })
+        .collect()
 }
 
 fn plan_preset() -> CollaborationModeMask {
@@ -68,6 +88,18 @@ fn default_mode_instructions(collaboration_modes_config: CollaborationModesConfi
         )
 }
 
+fn collaboration_mode_request_user_input_available(
+    mode: Option<ModeKind>,
+    collaboration_modes_config: CollaborationModesConfig,
+) -> bool {
+    mode.is_some_and(|mode_kind| {
+        request_user_input_is_available(
+            mode_kind,
+            collaboration_modes_config.default_mode_request_user_input,
+        )
+    })
+}
+
 fn format_mode_names(modes: &[ModeKind]) -> String {
     let mode_names: Vec<&str> = modes.iter().map(|mode| mode.display_name()).collect();
     match mode_names.as_slice() {
@@ -83,7 +115,7 @@ fn request_user_input_availability_message(
     default_mode_request_user_input: bool,
 ) -> String {
     let mode_name = mode.display_name();
-    if mode.request_user_input_available(default_mode_request_user_input) {
+    if request_user_input_is_available(mode, default_mode_request_user_input) {
         format!("The `request_user_input` tool is available in {mode_name} mode.")
     } else {
         format!(
@@ -153,5 +185,21 @@ mod tests {
             default_instructions
                 .contains("ask the user directly with a concise plain-text question")
         );
+    }
+
+    #[test]
+    fn builtin_collaboration_mode_metadata_uses_runtime_request_user_input_availability() {
+        let disabled = builtin_collaboration_mode_metadata(CollaborationModesConfig::default());
+        assert_eq!(disabled.len(), 2);
+        assert_eq!(disabled[0].mode, Some(ModeKind::Plan));
+        assert!(disabled[0].request_user_input_available);
+        assert_eq!(disabled[1].mode, Some(ModeKind::Default));
+        assert!(!disabled[1].request_user_input_available);
+
+        let enabled = builtin_collaboration_mode_metadata(CollaborationModesConfig {
+            default_mode_request_user_input: true,
+        });
+        assert_eq!(enabled[1].mode, Some(ModeKind::Default));
+        assert!(enabled[1].request_user_input_available);
     }
 }

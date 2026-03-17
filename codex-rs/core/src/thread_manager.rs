@@ -22,6 +22,7 @@ use crate::rollout::RolloutRecorder;
 use crate::rollout::truncation;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillsManager;
+use codex_app_server_protocol::CollaborationModeMask as CollaborationModeMetadata;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelPreset;
@@ -284,6 +285,10 @@ impl ThreadManager {
         self.state
             .models_manager
             .default_mode_request_user_input_enabled()
+    }
+
+    pub fn list_collaboration_mode_metadata(&self) -> Vec<CollaborationModeMetadata> {
+        self.state.models_manager.list_collaboration_mode_metadata()
     }
 
     pub async fn list_thread_ids(&self) -> Vec<ThreadId> {

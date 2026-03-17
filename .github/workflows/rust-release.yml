@@ -600,7 +600,8 @@ jobs:
             exit 1
           fi
 
-          for tarball in "${tarballs[@]}"; do
+          publish_tarball() {
+            local tarball="$1"
             filename="$(basename "${tarball}")"
             tag=""
 
@@ -632,15 +633,35 @@ jobs:
 
             echo "${publish_output}"
             if [[ ${publish_status} -eq 0 ]]; then
-              continue
+              return 0
             fi
 
             if grep -qiE "previously published|cannot publish over|version already exists" <<< "${publish_output}"; then
               echo "Skipping already-published package version for ${filename}"
-              continue
+              return 0
             fi
 
-            exit "${publish_status}"
+            return "${publish_status}"
+          }
+
+          for tarball in "${tarballs[@]}"; do
+            filename="$(basename "${tarball}")"
+            case "${filename}" in
+              codex-npm-linux-*-"${VERSION}".tgz|codex-npm-darwin-*-"${VERSION}".tgz|codex-npm-win32-*-"${VERSION}".tgz)
+                publish_tarball "${tarball}"
+                ;;
+            esac
+          done
+
+          for tarball in "${tarballs[@]}"; do
+            filename="$(basename "${tarball}")"
+            case "${filename}" in
+              codex-npm-linux-*-"${VERSION}".tgz|codex-npm-darwin-*-"${VERSION}".tgz|codex-npm-win32-*-"${VERSION}".tgz)
+                ;;
+              *)
+                publish_tarball "${tarball}"
+                ;;
+            esac
           done
 
   winget:

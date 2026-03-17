@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_app_server_protocol::CollaborationModeMask as CollaborationModeMetadata;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
@@ -86,6 +87,12 @@ pub fn all_model_presets() -> &'static Vec<ModelPreset> {
 
 pub fn builtin_collaboration_mode_presets() -> Vec<CollaborationModeMask> {
     collaboration_mode_presets::builtin_collaboration_mode_presets(
+        collaboration_mode_presets::CollaborationModesConfig::default(),
+    )
+}
+
+pub fn builtin_collaboration_mode_metadata() -> Vec<CollaborationModeMetadata> {
+    collaboration_mode_presets::builtin_collaboration_mode_metadata(
         collaboration_mode_presets::CollaborationModesConfig::default(),
     )
 }

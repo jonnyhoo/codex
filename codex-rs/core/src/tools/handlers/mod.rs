@@ -32,6 +32,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::codex::Session;
+use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
 use crate::sandboxing::merge_permission_profiles;
@@ -163,6 +164,16 @@ pub(crate) fn normalize_and_validate_additional_permissions(
     } else {
         Ok(None)
     }
+}
+
+pub(crate) fn request_permission_enabled_for_turn(
+    session: &Session,
+    turn: &crate::codex::TurnContext,
+) -> bool {
+    // Prefer the turn-scoped tool snapshot, but keep a compatibility fallback for
+    // tests and live feature toggles that mutate session flags after the turn was created.
+    turn.tools_config.request_permission_enabled
+        || session.features().enabled(Feature::RequestPermissions)
 }
 
 pub(super) struct EffectiveAdditionalPermissions {
