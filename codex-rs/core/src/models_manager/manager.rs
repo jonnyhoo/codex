@@ -117,6 +117,11 @@ impl ModelsManager {
         self.list_collaboration_modes_for_config(self.collaboration_modes_config)
     }
 
+    pub fn default_mode_request_user_input_enabled(&self) -> bool {
+        self.collaboration_modes_config
+            .default_mode_request_user_input
+    }
+
     pub fn list_collaboration_modes_for_config(
         &self,
         collaboration_modes_config: CollaborationModesConfig,

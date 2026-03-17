@@ -1743,13 +1743,15 @@ pub struct CollaborationModeMask {
 
 impl From<CoreCollaborationModeMask> for CollaborationModeMask {
     fn from(value: CoreCollaborationModeMask) -> Self {
-        let request_user_input_available = collaboration_mode_request_user_input_available(
-            value.mode,
-            value
-                .developer_instructions
-                .as_ref()
-                .and_then(Option::as_deref),
-        );
+        Self::from_core_mask(value, false)
+    }
+}
+
+impl CollaborationModeMask {
+    pub fn from_core_mask(
+        value: CoreCollaborationModeMask,
+        default_mode_request_user_input: bool,
+    ) -> Self {
         Self {
             description: collaboration_mode_description(value.mode, &value.name),
             tui_visible: collaboration_mode_tui_visible(value.mode),
@@ -1762,7 +1764,10 @@ impl From<CoreCollaborationModeMask> for CollaborationModeMask {
             mode: value.mode,
             model: value.model,
             reasoning_effort: value.reasoning_effort,
-            request_user_input_available,
+            request_user_input_available: collaboration_mode_request_user_input_available(
+                value.mode,
+                default_mode_request_user_input,
+            ),
             streams_proposed_plan: collaboration_mode_streams_proposed_plan(value.mode),
         }
     }
@@ -1792,27 +1797,9 @@ fn collaboration_mode_description(mode: Option<ModeKind>, name: &str) -> String 
 
 fn collaboration_mode_request_user_input_available(
     mode: Option<ModeKind>,
-    developer_instructions: Option<&str>,
+    default_mode_request_user_input: bool,
 ) -> bool {
-    const DEFAULT_MODE_REQUEST_USER_INPUT_AVAILABLE: &str =
-        "The `request_user_input` tool is available in Default mode.";
-    const DEFAULT_MODE_REQUEST_USER_INPUT_UNAVAILABLE: &str =
-        "The `request_user_input` tool is unavailable in Default mode.";
-
-    match mode {
-        Some(mode) if mode != ModeKind::Default => mode.request_user_input_available(false),
-        _ => developer_instructions
-            .and_then(|instructions| {
-                if instructions.contains(DEFAULT_MODE_REQUEST_USER_INPUT_AVAILABLE) {
-                    Some(true)
-                } else if instructions.contains(DEFAULT_MODE_REQUEST_USER_INPUT_UNAVAILABLE) {
-                    Some(false)
-                } else {
-                    mode.map(|mode| mode.request_user_input_available(false))
-                }
-            })
-            .unwrap_or(false),
-    }
+    mode.is_some_and(|mode| mode.request_user_input_available(default_mode_request_user_input))
 }
 
 fn collaboration_mode_allows_repo_mutation(mode: Option<ModeKind>) -> bool {
@@ -6737,13 +6724,16 @@ mod tests {
     fn collaboration_mode_mask_conversion_includes_behavior_metadata() {
         use codex_protocol::config_types::CollaborationModeMask as CoreCollaborationModeMask;
 
-        let plan = CollaborationModeMask::from(CoreCollaborationModeMask {
-            name: "Plan".to_string(),
-            mode: Some(ModeKind::Plan),
-            model: None,
-            reasoning_effort: Some(Some(ReasoningEffort::Medium)),
-            developer_instructions: Some(Some("plan".to_string())),
-        });
+        let plan = CollaborationModeMask::from_core_mask(
+            CoreCollaborationModeMask {
+                name: "Plan".to_string(),
+                mode: Some(ModeKind::Plan),
+                model: None,
+                reasoning_effort: Some(Some(ReasoningEffort::Medium)),
+                developer_instructions: Some(Some("plan".to_string())),
+            },
+            false,
+        );
         assert_eq!(
             plan,
             CollaborationModeMask {
@@ -6763,15 +6753,16 @@ mod tests {
             }
         );
 
-        let default = CollaborationModeMask::from(CoreCollaborationModeMask {
-            name: "Default".to_string(),
-            mode: Some(ModeKind::Default),
-            model: None,
-            reasoning_effort: None,
-            developer_instructions: Some(Some(
-                "The `request_user_input` tool is available in Default mode.".to_string(),
-            )),
-        });
+        let default = CollaborationModeMask::from_core_mask(
+            CoreCollaborationModeMask {
+                name: "Default".to_string(),
+                mode: Some(ModeKind::Default),
+                model: None,
+                reasoning_effort: None,
+                developer_instructions: Some(Some("ignored".to_string())),
+            },
+            true,
+        );
         assert_eq!(
             default,
             CollaborationModeMask {
@@ -6787,6 +6778,34 @@ mod tests {
                 update_plan_available: true,
                 requires_proposed_plan_block: false,
                 request_user_input_available: true,
+                streams_proposed_plan: false,
+            }
+        );
+
+        let default_without_flag = CollaborationModeMask::from(CoreCollaborationModeMask {
+            name: "Default".to_string(),
+            mode: Some(ModeKind::Default),
+            model: None,
+            reasoning_effort: None,
+            developer_instructions: Some(Some(
+                "The `request_user_input` tool is available in Default mode.".to_string(),
+            )),
+        });
+        assert_eq!(
+            default_without_flag,
+            CollaborationModeMask {
+                name: "Default".to_string(),
+                mode: Some(ModeKind::Default),
+                model: None,
+                reasoning_effort: None,
+                description:
+                    "Execute the task directly with reasonable assumptions and concise progress updates."
+                        .to_string(),
+                tui_visible: true,
+                allows_repo_mutation: true,
+                update_plan_available: true,
+                requires_proposed_plan_block: false,
+                request_user_input_available: false,
                 streams_proposed_plan: false,
             }
         );

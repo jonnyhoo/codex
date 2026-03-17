@@ -35,6 +35,7 @@ use codex_app_server_protocol::CancelLoginAccountStatus;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CollaborationModeListParams;
 use codex_app_server_protocol::CollaborationModeListResponse;
+use codex_app_server_protocol::CollaborationModeMask;
 use codex_app_server_protocol::CommandExecParams;
 use codex_app_server_protocol::CommandExecResizeParams;
 use codex_app_server_protocol::CommandExecTerminateParams;
@@ -4210,10 +4211,14 @@ impl CodexMessageProcessor {
         params: CollaborationModeListParams,
     ) {
         let CollaborationModeListParams {} = params;
+        let default_mode_request_user_input =
+            thread_manager.default_mode_request_user_input_enabled();
         let items = thread_manager
             .list_collaboration_modes()
             .into_iter()
-            .map(Into::into)
+            .map(|mask| {
+                CollaborationModeMask::from_core_mask(mask, default_mode_request_user_input)
+            })
             .collect();
         let response = CollaborationModeListResponse { data: items };
         outgoing.send_response(request_id, response).await;

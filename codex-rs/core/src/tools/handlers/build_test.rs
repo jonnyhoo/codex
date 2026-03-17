@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -39,6 +40,7 @@ use crate::truncate::formatted_truncate_text;
 use crate::util::ancestor_search_boundary;
 
 const DEFAULT_STEP_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+const DESCENDANT_SEARCH_MAX_DEPTH: usize = 3;
 const STEP_OUTPUT_EXCERPT_BYTES: usize = 4 * 1024;
 const CARGO_LOCK_WAIT_TEXT: &str = "Blocking waiting for file lock";
 
@@ -114,6 +116,13 @@ struct PlannedStep {
     command: String,
 }
 
+#[derive(Debug)]
+struct PlanningFailure {
+    detection: ProjectDetection,
+    warnings: Vec<String>,
+    message: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum StepStatus {
@@ -156,6 +165,8 @@ struct RunProjectChecksResponse {
     available_scripts: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     steps: Vec<StepResult>,
     summary: String,
@@ -189,7 +200,21 @@ impl ToolHandler for RunProjectChecksHandler {
 
         let cwd = resolve_workdir_base_path(&arguments, turn.cwd.as_path())?;
         let args: RunProjectChecksArgs = parse_arguments_with_base_path(&arguments, cwd.as_path())?;
-        let detection = detect_project(cwd.as_path(), args.project_type)?;
+        let detection = match detect_project(cwd.as_path(), args.project_type) {
+            Ok(detection) => detection,
+            Err(FunctionCallError::RespondToModel(message)) => {
+                return serialize_error_response(
+                    &args,
+                    error_project_root(cwd.as_path()),
+                    DetectedProjectType::Unknown,
+                    None,
+                    BTreeSet::new(),
+                    Vec::new(),
+                    message,
+                );
+            }
+            Err(err) => return Err(err),
+        };
 
         if matches!(args.task, ProjectChecksTask::Detect) {
             let response = RunProjectChecksResponse {
@@ -203,6 +228,7 @@ impl ToolHandler for RunProjectChecksHandler {
                 package_manager: detection.package_manager,
                 available_scripts: detection.scripts.into_iter().collect(),
                 warnings: detection.warnings,
+                error: None,
                 steps: Vec::new(),
                 summary: format!(
                     "Detected {} project at {}",
@@ -213,8 +239,25 @@ impl ToolHandler for RunProjectChecksHandler {
             return serialize_response(response);
         }
 
-        let mut warnings = detection.warnings.clone();
-        let steps = plan_steps(&args, &detection, &mut warnings)?;
+        let (detection, steps, warnings) =
+            match plan_steps_with_fallback(cwd.as_path(), &args, detection) {
+                Ok(result) => result,
+                Err(PlanningFailure {
+                    detection,
+                    warnings,
+                    message,
+                }) => {
+                    return serialize_error_response(
+                        &args,
+                        detection.project_root,
+                        detection.project_type,
+                        detection.package_manager,
+                        detection.scripts,
+                        warnings,
+                        message,
+                    );
+                }
+            };
         let total_steps = steps.len();
         let mut results = Vec::with_capacity(steps.len());
         let mut success = true;
@@ -254,6 +297,7 @@ impl ToolHandler for RunProjectChecksHandler {
             package_manager: detection.package_manager,
             available_scripts: detection.scripts.into_iter().collect(),
             warnings,
+            error: None,
             steps: results,
             summary,
         };
@@ -280,18 +324,41 @@ fn serialize_response_with_success(
     Ok(FunctionToolOutput::from_text(text, Some(success)))
 }
 
+fn serialize_error_response(
+    args: &RunProjectChecksArgs,
+    project_root: PathBuf,
+    detected_project_type: DetectedProjectType,
+    package_manager: Option<String>,
+    scripts: BTreeSet<String>,
+    warnings: Vec<String>,
+    error: String,
+) -> Result<FunctionToolOutput, FunctionCallError> {
+    let summary = error.clone();
+    serialize_response_with_success(
+        RunProjectChecksResponse {
+            task: args.task,
+            requested_project_type: args.project_type,
+            detected_project_type,
+            project_root: project_root.display().to_string(),
+            quick: args.quick,
+            success: false,
+            stopped_after_failure: false,
+            package_manager,
+            available_scripts: scripts.into_iter().collect(),
+            warnings,
+            error: Some(error),
+            steps: Vec::new(),
+            summary,
+        },
+        false,
+    )
+}
+
 fn detect_project(
     start: &Path,
     requested: RequestedProjectType,
 ) -> Result<ProjectDetection, FunctionCallError> {
-    let start = if start.is_dir() {
-        start.to_path_buf()
-    } else {
-        start
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| start.to_path_buf())
-    };
+    let start = normalize_project_search_start(start);
     let boundary = ancestor_search_boundary(&start);
 
     for ancestor in start.ancestors() {
@@ -324,6 +391,22 @@ fn detect_project(
         scripts: BTreeSet::new(),
         warnings: vec!["Could not detect a supported project type automatically.".to_string()],
     })
+}
+
+fn normalize_project_search_start(start: &Path) -> PathBuf {
+    if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| start.to_path_buf())
+    }
+}
+
+fn error_project_root(start: &Path) -> PathBuf {
+    let start = normalize_project_search_start(start);
+    crate::git_info::get_git_repo_root(&start).unwrap_or(start)
 }
 
 fn detect_at_ancestor(
@@ -572,6 +655,153 @@ fn plan_steps(
         }
         steps
     })
+}
+
+fn plan_steps_with_fallback(
+    start: &Path,
+    args: &RunProjectChecksArgs,
+    detection: ProjectDetection,
+) -> Result<(ProjectDetection, Vec<PlannedStep>, Vec<String>), PlanningFailure> {
+    let mut warnings = detection.warnings.clone();
+    match plan_steps(args, &detection, &mut warnings) {
+        Ok(steps) => Ok((detection, steps, warnings)),
+        Err(FunctionCallError::RespondToModel(message))
+            if args.project_type == RequestedProjectType::Auto
+                && !matches!(args.task, ProjectChecksTask::Detect) =>
+        {
+            if let Some((fallback_detection, fallback_steps, mut fallback_warnings)) =
+                find_descendant_project_fallback(start, args, &detection)
+            {
+                fallback_warnings.push(format!(
+                    "Auto-detected {} project at {} but it could not satisfy task {}; using descendant {} project at {} instead.",
+                    detection.project_type.as_str(),
+                    detection.project_root.display(),
+                    args.task.as_str(),
+                    fallback_detection.project_type.as_str(),
+                    fallback_detection.project_root.display(),
+                ));
+                Ok((fallback_detection, fallback_steps, fallback_warnings))
+            } else {
+                Err(PlanningFailure {
+                    detection,
+                    warnings,
+                    message,
+                })
+            }
+        }
+        Err(FunctionCallError::RespondToModel(message)) => Err(PlanningFailure {
+            detection,
+            warnings,
+            message,
+        }),
+        Err(FunctionCallError::Fatal(message)) => Err(PlanningFailure {
+            detection,
+            warnings,
+            message,
+        }),
+        Err(FunctionCallError::MissingLocalShellCallId) => Err(PlanningFailure {
+            detection,
+            warnings,
+            message: "missing local shell call id".to_string(),
+        }),
+    }
+}
+
+fn find_descendant_project_fallback(
+    start: &Path,
+    args: &RunProjectChecksArgs,
+    current_detection: &ProjectDetection,
+) -> Option<(ProjectDetection, Vec<PlannedStep>, Vec<String>)> {
+    let start = normalize_project_search_start(start);
+    let mut queue = VecDeque::from([(start, 0usize)]);
+    let mut best: Option<(
+        (usize, usize, String),
+        ProjectDetection,
+        Vec<PlannedStep>,
+        Vec<String>,
+    )> = None;
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if depth >= DESCENDANT_SEARCH_MAX_DEPTH {
+            continue;
+        }
+
+        let mut child_dirs = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    path.is_dir().then_some(path)
+                })
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| !skip_descendant_search_dir(name))
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => continue,
+        };
+        child_dirs.sort();
+
+        for child_dir in child_dirs {
+            if let Ok(Some(candidate_detection)) =
+                detect_at_ancestor(child_dir.as_path(), RequestedProjectType::Auto)
+            {
+                if candidate_detection.project_root != current_detection.project_root {
+                    let mut candidate_warnings = candidate_detection.warnings.clone();
+                    if let Ok(candidate_steps) =
+                        plan_steps(args, &candidate_detection, &mut candidate_warnings)
+                    {
+                        let candidate_key = (
+                            detected_project_type_rank(candidate_detection.project_type),
+                            depth + 1,
+                            candidate_detection.project_root.display().to_string(),
+                        );
+                        let replace = best
+                            .as_ref()
+                            .is_none_or(|best_candidate| candidate_key < best_candidate.0);
+                        if replace {
+                            best = Some((
+                                candidate_key,
+                                candidate_detection,
+                                candidate_steps,
+                                candidate_warnings,
+                            ));
+                        }
+                    }
+                }
+            }
+            queue.push_back((child_dir, depth + 1));
+        }
+    }
+
+    best.map(|(_, detection, steps, warnings)| (detection, steps, warnings))
+}
+
+fn detected_project_type_rank(project_type: DetectedProjectType) -> usize {
+    match project_type {
+        DetectedProjectType::Rust => 0,
+        DetectedProjectType::Go => 1,
+        DetectedProjectType::Node => 2,
+        DetectedProjectType::Python => 3,
+        DetectedProjectType::Unknown => 4,
+    }
+}
+
+fn skip_descendant_search_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | ".venv"
+            | "__pycache__"
+            | "build"
+            | "dist"
+            | "node_modules"
+            | "target"
+            | "vendor"
+    )
 }
 
 fn plan_rust_steps(args: &RunProjectChecksArgs) -> Vec<PlannedStep> {
@@ -1058,6 +1288,17 @@ impl RequestedProjectType {
     }
 }
 
+impl ProjectChecksTask {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Detect => "detect",
+            Self::Build => "build",
+            Self::Test => "test",
+            Self::Verify => "verify",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1146,6 +1387,77 @@ mod tests {
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].label, "lint script");
         assert_eq!(steps[1].label, "test script");
+    }
+
+    #[test]
+    fn auto_verify_falls_back_to_descendant_rust_workspace_when_root_node_lacks_scripts() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let rust_workspace = repo.join("codex-rs");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        std::fs::create_dir_all(&rust_workspace).expect("create rust workspace");
+        std::fs::write(
+            repo.join("package.json"),
+            r#"{"private":true,"scripts":{"format":"prettier --check .","lint:docs":"markdownlint ."}} "#,
+        )
+        .expect("write package json");
+        std::fs::write(rust_workspace.join("Cargo.toml"), "[workspace]\n").expect("write cargo");
+
+        let args = RunProjectChecksArgs {
+            task: ProjectChecksTask::Verify,
+            project_type: RequestedProjectType::Auto,
+            target: None,
+            test_filter: None,
+            quick: true,
+            continue_on_error: false,
+            timeout_ms: None,
+        };
+
+        let detection = detect_project(&repo, RequestedProjectType::Auto).expect("detect");
+        assert_eq!(detection.project_type, DetectedProjectType::Node);
+
+        let (fallback_detection, steps, warnings) =
+            plan_steps_with_fallback(&repo, &args, detection).expect("fallback plan");
+
+        assert_eq!(fallback_detection.project_type, DetectedProjectType::Rust);
+        assert_eq!(fallback_detection.project_root, rust_workspace);
+        assert_eq!(steps[0].label, "cargo check");
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("using descendant rust project")
+                && warning.contains("could not satisfy task verify")
+        }));
+    }
+
+    #[test]
+    fn serialize_error_response_returns_structured_json() {
+        let args = RunProjectChecksArgs {
+            task: ProjectChecksTask::Verify,
+            project_type: RequestedProjectType::Auto,
+            target: None,
+            test_filter: None,
+            quick: true,
+            continue_on_error: false,
+            timeout_ms: None,
+        };
+
+        let output = serialize_error_response(
+            &args,
+            PathBuf::from("repo"),
+            DetectedProjectType::Node,
+            Some("pnpm".to_string()),
+            ["format".to_string()].into_iter().collect(),
+            vec!["warning".to_string()],
+            "planning failed".to_string(),
+        )
+        .expect("serialize response");
+        assert_eq!(output.success, Some(false));
+
+        let value: serde_json::Value =
+            serde_json::from_str(&output.into_text()).expect("structured error json");
+        assert_eq!(value["success"], false);
+        assert_eq!(value["error"], "planning failed");
+        assert_eq!(value["detected_project_type"], "node");
+        assert_eq!(value["available_scripts"][0], "format");
     }
 
     #[test]

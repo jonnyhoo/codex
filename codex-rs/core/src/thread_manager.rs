@@ -280,6 +280,12 @@ impl ThreadManager {
         self.state.models_manager.list_collaboration_modes()
     }
 
+    pub fn default_mode_request_user_input_enabled(&self) -> bool {
+        self.state
+            .models_manager
+            .default_mode_request_user_input_enabled()
+    }
+
     pub async fn list_thread_ids(&self) -> Vec<ThreadId> {
         self.state.list_thread_ids().await
     }
