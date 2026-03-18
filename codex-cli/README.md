@@ -684,8 +684,8 @@ Review the generated tarballs in `dist/npm/`, then publish platform tarballs
 first and the meta package last:
 
 ```bash
-npm publish dist/npm/codex-npm-win32-x64-0.3.1.tgz --tag win32-x64
-npm publish dist/npm/codex-npm-0.3.1.tgz
+npm publish dist/npm/codex-npm-win32-x64-0.3.2.tgz --tag win32-x64
+npm publish dist/npm/codex-npm-0.3.2.tgz
 ```
 
 ### Alternative build options

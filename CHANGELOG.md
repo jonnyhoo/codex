@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.2
+
+This fork repackages the Windows npm release so the published npm version and
+embedded native CLI version stay aligned.
+
+### Highlights
+
+- Rust workspace and npm package version bumped to `0.3.2`.
+- Windows npm packages now bundle fork-built `codex.exe`, `codex-command-runner.exe`, and `codex-windows-sandbox-setup.exe` instead of upstream `rust-v0.114.0` binaries.
+- `codex --version` now reports the same fork release version as the installed npm package.
+
+### Validation
+
+- `cargo build --release -p codex-cli --bin codex`
+- `cargo build --release -p codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup`
+- local npm staging smoke for `@jonnyhoo/codex` `0.3.2` using locally built Windows x64 release binaries
+
 ## v0.3.1
 
 This fork keeps the upstream `rust-v0.114.0` rebase while tightening the fork's
