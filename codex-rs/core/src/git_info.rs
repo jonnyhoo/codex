@@ -890,21 +890,37 @@ mod tests {
     async fn test_collect_git_info_git_repository() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let repo_path = create_test_git_repo(&temp_dir).await;
+        let expected_commit_hash = get_head_commit_hash(&repo_path)
+            .await
+            .expect("test repo should have a HEAD commit");
+        let expected_branch =
+            run_git_command_with_timeout(&["rev-parse", "--abbrev-ref", "HEAD"], &repo_path)
+                .await
+                .and_then(|output| {
+                    output
+                        .status
+                        .success()
+                        .then(|| String::from_utf8(output.stdout).ok())
+                        .flatten()
+                })
+                .map(|branch| branch.trim().to_string())
+                .expect("test repo should have an active branch");
 
         let git_info = collect_git_info(&repo_path)
             .await
             .expect("Should collect git info from repo");
 
-        // Should have commit hash
-        assert!(git_info.commit_hash.is_some());
-        let commit_hash = git_info.commit_hash.unwrap();
+        let commit_hash = git_info
+            .commit_hash
+            .expect("git info should include the HEAD commit hash");
+        assert_eq!(commit_hash, expected_commit_hash);
         assert_eq!(commit_hash.len(), 40); // SHA-1 hash should be 40 characters
         assert!(commit_hash.chars().all(|c| c.is_ascii_hexdigit()));
 
-        // Should have branch (likely "main" or "master")
-        assert!(git_info.branch.is_some());
-        let branch = git_info.branch.unwrap();
-        assert!(branch == "main" || branch == "master");
+        let branch = git_info
+            .branch
+            .expect("git info should include the active branch");
+        assert_eq!(branch, expected_branch);
 
         // Repository URL might be None for local repos without remote
         // This is acceptable behavior

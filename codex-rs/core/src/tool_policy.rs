@@ -84,7 +84,8 @@ pub(crate) fn runtime_tool_policy(
     mode_kind: ModeKind,
     tools_config: &ToolsConfig,
 ) -> RuntimeToolPolicyContext {
-    let request_user_input = RuntimeRequestUserInputPolicy::from_tools_config(mode_kind, tools_config);
+    let request_user_input =
+        RuntimeRequestUserInputPolicy::from_tools_config(mode_kind, tools_config);
     RuntimeToolPolicyContext {
         collaboration: RuntimeCollaborationToolPolicyContext::from_mode_and_tools(
             mode_kind,

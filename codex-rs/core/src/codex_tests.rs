@@ -2994,16 +2994,23 @@ async fn turn_context_runtime_context_mirrors_turn_state() {
     );
     assert_eq!(runtime.tools.tools_config, turn_context.tools_config);
     assert_eq!(
-        runtime.tools.policy.request_user_input.tool_enabled,
+        runtime.tools.tool_policy.request_user_input.tool_enabled,
         turn_context.tools_config.request_user_input
     );
-    assert_eq!(runtime.tools.policy.request_user_input.available, false,);
     assert_eq!(
-        runtime.tools.policy.request_user_input.default_mode_enabled,
+        runtime.tools.tool_policy.request_user_input.available,
+        false,
+    );
+    assert_eq!(
+        runtime
+            .tools
+            .tool_policy
+            .request_user_input
+            .default_mode_enabled,
         turn_context.tools_config.default_mode_request_user_input
     );
     assert_eq!(
-        runtime.tools.policy.request_user_input.allowed_modes,
+        runtime.tools.tool_policy.request_user_input.allowed_modes,
         vec![ModeKind::Plan]
     );
 }

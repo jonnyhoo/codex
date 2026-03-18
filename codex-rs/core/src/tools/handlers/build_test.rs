@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -586,15 +587,17 @@ enum PythonRunner {
     Python,
 }
 
-impl PythonRunner {
-    fn to_string(self) -> String {
+impl fmt::Display for PythonRunner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Uv => "uv".to_string(),
-            Self::Poetry => "poetry".to_string(),
-            Self::Python => "python".to_string(),
+            Self::Uv => write!(f, "uv"),
+            Self::Poetry => write!(f, "poetry"),
+            Self::Python => write!(f, "python"),
         }
     }
+}
 
+impl PythonRunner {
     fn command(self, args: &[String]) -> String {
         let mut tokens = match self {
             Self::Uv => vec!["uv".to_string(), "run".to_string()],
@@ -621,7 +624,7 @@ fn plan_steps(
     detection: &ProjectDetection,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PlannedStep>, FunctionCallError> {
-    match detection.project_type {
+    let steps = match detection.project_type {
         DetectedProjectType::Rust => Ok(plan_rust_steps(args)),
         DetectedProjectType::Go => Ok(plan_go_steps(args)),
         DetectedProjectType::Node => plan_node_steps(args, detection),
@@ -629,32 +632,32 @@ fn plan_steps(
         DetectedProjectType::Unknown => Err(FunctionCallError::RespondToModel(
             "run_project_checks could not detect a supported project type; use task=detect or set project_type explicitly".to_string(),
         )),
+    }?;
+
+    if args.target.is_some()
+        && !matches!(
+            detection.project_type,
+            DetectedProjectType::Rust | DetectedProjectType::Go
+        )
+    {
+        warnings.push(format!(
+            "Ignored `target` for {} projects.",
+            detection.project_type.as_str()
+        ));
     }
-    .map(|steps| {
-        if args.target.is_some()
-            && !matches!(
-                detection.project_type,
-                DetectedProjectType::Rust | DetectedProjectType::Go
-            )
-        {
-            warnings.push(format!(
-                "Ignored `target` for {} projects.",
-                detection.project_type.as_str()
-            ));
-        }
-        if args.test_filter.is_some()
-            && !matches!(
-                detection.project_type,
-                DetectedProjectType::Rust | DetectedProjectType::Go | DetectedProjectType::Python
-            )
-        {
-            warnings.push(format!(
-                "Ignored `test_filter` for {} projects.",
-                detection.project_type.as_str()
-            ));
-        }
-        steps
-    })
+    if args.test_filter.is_some()
+        && !matches!(
+            detection.project_type,
+            DetectedProjectType::Rust | DetectedProjectType::Go | DetectedProjectType::Python
+        )
+    {
+        warnings.push(format!(
+            "Ignored `test_filter` for {} projects.",
+            detection.project_type.as_str()
+        ));
+    }
+
+    Ok(steps)
 }
 
 fn plan_steps_with_fallback(
@@ -712,14 +715,16 @@ fn find_descendant_project_fallback(
     args: &RunProjectChecksArgs,
     current_detection: &ProjectDetection,
 ) -> Option<(ProjectDetection, Vec<PlannedStep>, Vec<String>)> {
-    let start = normalize_project_search_start(start);
-    let mut queue = VecDeque::from([(start, 0usize)]);
-    let mut best: Option<(
+    type DescendantFallbackCandidate = (
         (usize, usize, String),
         ProjectDetection,
         Vec<PlannedStep>,
         Vec<String>,
-    )> = None;
+    );
+
+    let start = normalize_project_search_start(start);
+    let mut queue = VecDeque::from([(start, 0usize)]);
+    let mut best: Option<DescendantFallbackCandidate> = None;
 
     while let Some((dir, depth)) = queue.pop_front() {
         if depth >= DESCENDANT_SEARCH_MAX_DEPTH {
@@ -746,28 +751,27 @@ fn find_descendant_project_fallback(
         for child_dir in child_dirs {
             if let Ok(Some(candidate_detection)) =
                 detect_at_ancestor(child_dir.as_path(), RequestedProjectType::Auto)
+                && candidate_detection.project_root != current_detection.project_root
             {
-                if candidate_detection.project_root != current_detection.project_root {
-                    let mut candidate_warnings = candidate_detection.warnings.clone();
-                    if let Ok(candidate_steps) =
-                        plan_steps(args, &candidate_detection, &mut candidate_warnings)
-                    {
-                        let candidate_key = (
-                            detected_project_type_rank(candidate_detection.project_type),
-                            depth + 1,
-                            candidate_detection.project_root.display().to_string(),
-                        );
-                        let replace = best
-                            .as_ref()
-                            .is_none_or(|best_candidate| candidate_key < best_candidate.0);
-                        if replace {
-                            best = Some((
-                                candidate_key,
-                                candidate_detection,
-                                candidate_steps,
-                                candidate_warnings,
-                            ));
-                        }
+                let mut candidate_warnings = candidate_detection.warnings.clone();
+                if let Ok(candidate_steps) =
+                    plan_steps(args, &candidate_detection, &mut candidate_warnings)
+                {
+                    let candidate_key = (
+                        detected_project_type_rank(candidate_detection.project_type),
+                        depth + 1,
+                        candidate_detection.project_root.display().to_string(),
+                    );
+                    let replace = best
+                        .as_ref()
+                        .is_none_or(|best_candidate| candidate_key < best_candidate.0);
+                    if replace {
+                        best = Some((
+                            candidate_key,
+                            candidate_detection,
+                            candidate_steps,
+                            candidate_warnings,
+                        ));
                     }
                 }
             }

@@ -62,10 +62,7 @@ impl ToolHandler for RequestUserInputHandler {
         };
 
         let mode = turn.collaboration_mode.mode;
-        if let Some(message) = tool_policy
-            .request_user_input
-            .unavailable_message(mode)
-        {
+        if let Some(message) = tool_policy.request_user_input.unavailable_message(mode) {
             return Err(FunctionCallError::RespondToModel(message));
         }
 

@@ -2784,6 +2784,7 @@ mod tests {
             create_write_stdin_tool(),
             PLAN_TOOL.clone(),
             create_request_user_input_tool(CollaborationModesConfig::default()),
+            create_run_project_checks_tool(),
             create_lsp_tool(),
             create_write_file_tool(),
             create_edit_file_tool(),
